@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,7 +17,7 @@ import (
 	docker "github.com/fsouza/go-dockerclient"
 	dutil "github.com/open-lambda/open-lambda/ol/sandbox/dockerutil"
 
-	"github.com/open-lambda/open-lambda/ol/config"
+	"github.com/open-lambda/open-lambda/ol/common"
 	"github.com/open-lambda/open-lambda/ol/server"
 	"github.com/urfave/cli"
 )
@@ -37,38 +38,55 @@ func initOLDir(olPath string) (err error) {
 		return err
 	}
 
-	if err := config.LoadDefaults(olPath); err != nil {
+	if err := common.LoadDefaults(olPath); err != nil {
 		return err
 	}
 
-	if err := config.Save(filepath.Join(olPath, "config.json")); err != nil {
+	confPath := filepath.Join(olPath, "config.json")
+	if err := common.SaveConf(confPath); err != nil {
 		return err
 	}
 
-	if err := os.Mkdir(config.Conf.Worker_dir, 0700); err != nil {
+	if err := os.Mkdir(common.Conf.Worker_dir, 0700); err != nil {
 		return err
 	}
 
-	if err := os.Mkdir(config.Conf.Registry, 0700); err != nil {
+	if err := os.Mkdir(common.Conf.Registry, 0700); err != nil {
 		return err
 	}
 
 	// create a base directory to run sock handlers
-	fmt.Printf("Create lambda base at %v (may take several minutes)\n", config.Conf.SOCK_base_path)
-	err = dutil.DumpDockerImage(client, "lambda", config.Conf.SOCK_base_path)
+	fmt.Printf("Create lambda base at %v (may take several minutes)\n", common.Conf.SOCK_base_path)
+	err = dutil.DumpDockerImage(client, "lambda", common.Conf.SOCK_base_path)
 	if err != nil {
 		return err
 	}
 
 	// need this because Docker containers don't have a dns server in /etc/resolv.conf
-	dnsPath := filepath.Join(config.Conf.SOCK_base_path, "etc", "resolv.conf")
+	dnsPath := filepath.Join(common.Conf.SOCK_base_path, "etc", "resolv.conf")
 	if err := ioutil.WriteFile(dnsPath, []byte("nameserver 8.8.8.8\n"), 0644); err != nil {
 		return err
 	}
 
+	path := filepath.Join(common.Conf.SOCK_base_path, "dev", "null")
+	if err := exec.Command("mknod", "-m", "0644", path, "c", "1", "3").Run(); err != nil {
+		return err
+	}
+
+	path = filepath.Join(common.Conf.SOCK_base_path, "dev", "random")
+	if err := exec.Command("mknod", "-m", "0644", path, "c", "1", "8").Run(); err != nil {
+		return err
+	}
+
+	path = filepath.Join(common.Conf.SOCK_base_path, "dev", "urandom")
+	if err := exec.Command("mknod", "-m", "0644", path, "c", "1", "9").Run(); err != nil {
+		return err
+	}
+
 	fmt.Printf("Working Directory: %s\n\n", olPath)
-	fmt.Printf("Worker Defaults: \n%s\n\n", config.DumpStr())
-	fmt.Printf("You may now start a server using the \"worker\" command\n")
+	fmt.Printf("Worker Defaults: \n%s\n\n", common.DumpConfStr())
+	fmt.Printf("You may modify the defaults here: %s\n\n", confPath)
+	fmt.Printf("You may now start a server using the \"ol worker\" command\n")
 
 	return nil
 }
@@ -91,12 +109,12 @@ func status(ctx *cli.Context) error {
 	}
 
 	fmt.Printf("Worker Ping:\n")
-	err = config.LoadFile(filepath.Join(olPath, "config.json"))
+	err = common.LoadConf(filepath.Join(olPath, "config.json"))
 	if err != nil {
 		return err
 	}
 
-	url := fmt.Sprintf("http://localhost:%s/status", config.Conf.Worker_port)
+	url := fmt.Sprintf("http://localhost:%s/status", common.Conf.Worker_port)
 	response, err := http.Get(url)
 	if err != nil {
 		return fmt.Errorf("  Could not send GET to %s\n", url)
@@ -112,6 +130,72 @@ func status(ctx *cli.Context) error {
 	return nil
 }
 
+// modify the config.json file based on settings from cmdline: -o opt1=val1,opt2=val2,...
+//
+// apply changes in optsStr to config from confPath, saving result to overridePath
+func overrideOpts(confPath, overridePath, optsStr string) error {
+	b, err := ioutil.ReadFile(confPath)
+	if err != nil {
+		return err
+	}
+	conf := make(map[string]interface{})
+	if err := json.Unmarshal(b, &conf); err != nil {
+		return err
+	}
+
+	opts := strings.Split(optsStr, ",")
+	for _, opt := range opts {
+		parts := strings.Split(opt, "=")
+		if len(parts) != 2 {
+			return fmt.Errorf("Could not parse key=val: '%s'", opt)
+		}
+		keys := strings.Split(parts[0], ".")
+		val := parts[1]
+
+		c := conf
+		for i := 0; i < len(keys)-1; i++ {
+			sub, ok := c[keys[i]]
+			if !ok {
+				return fmt.Errorf("key '%s' not found", keys[i])
+			}
+			switch v := sub.(type) {
+			case map[string]interface{}:
+				c = v
+			default:
+				return fmt.Errorf("%s refers to a %T, not a map", keys[i], c[keys[i]])
+			}
+
+		}
+
+		key := keys[len(keys)-1]
+		prev, ok := c[key]
+		if !ok {
+			return fmt.Errorf("invalid option: '%s'", key)
+		}
+		switch prev.(type) {
+		case string:
+			c[key] = val
+		case float64:
+			c[key], err = strconv.Atoi(val)
+			if err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("config values of type %T (%s) must be edited manually in the config file ", prev, key)
+		}
+	}
+
+	// save back config
+	s, err := json.MarshalIndent(conf, "", "\t")
+	if err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(overridePath, s, 0644); err != nil {
+		return err
+	}
+	return nil
+}
+
 // workers corresponds to the "workers" command of the admin tool.
 //
 // The JSON config in the cluster template directory will be populated for each
@@ -123,6 +207,7 @@ func worker(ctx *cli.Context) error {
 		return err
 	}
 
+	// if `./ol new` not previously run, do that init now
 	if _, err := os.Stat(olPath); os.IsNotExist(err) {
 		fmt.Printf("no OL directory found at %s\n", olPath)
 		if err := initOLDir(olPath); err != nil {
@@ -132,17 +217,26 @@ func worker(ctx *cli.Context) error {
 		fmt.Printf("using existing OL directory at %s\n", olPath)
 	}
 
+	// aoeu
 	confPath := filepath.Join(olPath, "config.json")
+	overrides := ctx.String("options")
+	if overrides != "" {
+		overridesPath := confPath + ".overrides"
+		err = overrideOpts(confPath, overridesPath, overrides)
+		if err != nil {
+			return err
+		}
+		confPath = overridesPath
+	}
+
+	if err := common.LoadConf(confPath); err != nil {
+		return err
+	}
 
 	// should we run as a background process?
 	detach := ctx.Bool("detach")
 
 	if detach {
-		err := config.LoadFile(confPath)
-		if err != nil {
-			return err
-		}
-
 		// stdout+stderr both go to log
 		logPath := filepath.Join(olPath, "worker.out")
 		f, err := os.Create(logPath)
@@ -162,24 +256,35 @@ func worker(ctx *cli.Context) error {
 			return err
 		}
 
-		pidPath := filepath.Join(olPath, "worker.pid")
-		if err := ioutil.WriteFile(pidPath, []byte(fmt.Sprintf("%d", proc.Pid)), 0644); err != nil {
-			return err
-		}
+		died := make(chan error)
+		go func() {
+			_, err := proc.Wait()
+			died <- err
+		}()
 
-		fmt.Printf("Starting worker: pid=%d, port=%s, log=%s\n", proc.Pid, config.Conf.Worker_port, logPath)
+		fmt.Printf("Starting worker: pid=%d, port=%s, log=%s\n", proc.Pid, common.Conf.Worker_port, logPath)
 
 		var ping_err error
 
-		for i := 0; i < 3000; i++ {
+		for i := 0; i < 300; i++ {
+			// check if it has died
+			select {
+			case err := <-died:
+				if err != nil {
+					return err
+				}
+				return fmt.Errorf("worker process %d does not a appear to be running, check worker.out", proc.Pid)
+			default:
+			}
+
 			// is the worker still alive?
 			err := proc.Signal(syscall.Signal(0))
 			if err != nil {
-				return fmt.Errorf("worker process %d does not a appear to be running :: %s", proc.Pid, err)
+
 			}
 
 			// is it reachable?
-			url := fmt.Sprintf("http://localhost:%s/pid", config.Conf.Worker_port)
+			url := fmt.Sprintf("http://localhost:%s/pid", common.Conf.Worker_port)
 			response, err := http.Get(url)
 			if err != nil {
 				ping_err = err
@@ -205,10 +310,12 @@ func worker(ctx *cli.Context) error {
 
 		return fmt.Errorf("worker still not reachable after 30 seconds :: %s", ping_err)
 	} else {
-		server.Main(confPath)
+		if err := server.Main(); err != nil {
+			return err
+		}
 	}
 
-	return nil
+	return fmt.Errorf("this code should not be reachable!")
 }
 
 // kill corresponds to the "kill" command of the admin tool.
@@ -218,7 +325,12 @@ func kill(ctx *cli.Context) error {
 		return err
 	}
 
-	data, err := ioutil.ReadFile(filepath.Join(olPath, "worker.pid"))
+	// locate worker.pid, use it to get worker's PID
+	configPath := filepath.Join(olPath, "config.json")
+	if err := common.LoadConf(configPath); err != nil {
+		return err
+	}
+	data, err := ioutil.ReadFile(filepath.Join(common.Conf.Worker_dir, "worker.pid"))
 	if err != nil {
 		return err
 	}
@@ -227,6 +339,7 @@ func kill(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
+
 	fmt.Printf("Kill worker process with PID %d\n", pid)
 	p, err := os.FindProcess(pid)
 	if err != nil {
@@ -238,7 +351,7 @@ func kill(ctx *cli.Context) error {
 		fmt.Printf("Failed to kill process with PID %d.  May require manual cleanup.\n", pid)
 	}
 
-	for i := 0; i < 3000; i++ {
+	for i := 0; i < 300; i++ {
 		err := p.Signal(syscall.Signal(0))
 		if err != nil {
 			return nil // good, process must have stopped
@@ -247,30 +360,6 @@ func kill(ctx *cli.Context) error {
 	}
 
 	return fmt.Errorf("worker didn't stop after 30s")
-}
-
-// setconf sets a configuration option in the cluster's template
-func setconf(ctx *cli.Context) error {
-	olPath, err := getOlPath(ctx)
-	if err != nil {
-		return err
-	}
-
-	configPath := filepath.Join(olPath, "config.json")
-
-	if len(ctx.Args()) != 1 {
-		log.Fatal("Usage: admin setconf <json_options>")
-	}
-
-	if err := config.LoadFile(configPath); err != nil {
-		return err
-	} else if err := json.Unmarshal([]byte(ctx.Args()[0]), config.Conf); err != nil {
-		return fmt.Errorf("failed to set config options :: %v", err)
-	} else if err := config.Save(configPath); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // main runs the admin tool
@@ -313,19 +402,16 @@ OPTIONS:
 			Action:      newOL,
 		},
 		cli.Command{
-			Name:      "setconf",
-			Usage:     "Set a configuration option in the cluster's template.",
-			UsageText: "ol setconf [--path=NAME] options (options is JSON string)",
-			Flags:     []cli.Flag{pathFlag},
-			Action:    setconf,
-		},
-		cli.Command{
 			Name:        "worker",
 			Usage:       "Start one OL server",
 			UsageText:   "ol worker [--path=NAME] [--detach]",
-			Description: "Start one or more workers in cluster using the same config template.",
+			Description: "Start a lambda server.",
 			Flags: []cli.Flag{
 				pathFlag,
+				cli.StringFlag{
+					Name:  "options, o",
+					Usage: "Override options with: -o opt1=val1,opt2=val2/opt3.subopt31=val3",
+				},
 				cli.BoolFlag{
 					Name:  "detach, d",
 					Usage: "Run worker in background",

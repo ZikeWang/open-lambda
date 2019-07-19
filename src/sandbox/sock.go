@@ -10,63 +10,57 @@ code, initializing containers, etc.
 package sandbox
 
 import (
-	"bytes"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/open-lambda/open-lambda/ol/config"
-	"github.com/open-lambda/open-lambda/ol/handler/state"
-	"github.com/open-lambda/open-lambda/ol/util"
+	"github.com/open-lambda/open-lambda/ol/common"
 )
 
 type SOCKContainer struct {
-	cgf              *CgroupFactory
+	pool             *SOCKPool
 	id               string
-	cgId             string
+	meta             *SandboxMeta
 	containerRootDir string
-	baseDir          string
 	codeDir          string
 	scratchDir       string
-	status           state.HandlerState
-	initPid          string
-	initCmd          *exec.Cmd
-	unshareFlags     string
-	startCmd         []string
-	pipe             *os.File
+	cg               *Cgroup
+
+	// 1 for self, plus 1 for each child (we can't release memory
+	// until all descendents are dead, because they share the
+	// pages of this Container, but this is the only container
+	// charged
+	cgRefCount int
+
+	parent   Sandbox
+	children map[string]Sandbox
 }
 
-func NewSOCKContainer(
-	id, containerRootDir, baseDir, codeDir, scratchDir string,
-	cgf *CgroupFactory, unshareFlags string, startCmd []string) *SOCKContainer {
-
-	return &SOCKContainer{
-		id:               id,
-		containerRootDir: containerRootDir,
-		baseDir:          baseDir,
-		codeDir:          codeDir,
-		scratchDir:       scratchDir,
-		cgf:              cgf,
-		unshareFlags:     unshareFlags,
-		status:           state.Stopped,
-		startCmd:         startCmd,
-	}
+// add ID to each log message so we know which logs correspond to
+// which containers
+func (c *SOCKContainer) printf(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	log.Printf("%s [SOCK %s]", strings.TrimRight(msg, "\n"), c.id)
 }
 
-func (c *SOCKContainer) State() (hstate state.HandlerState, err error) {
-	return c.status, nil
+func (c *SOCKContainer) ID() string {
+	return c.id
 }
 
-func (c *SOCKContainer) Channel() (channel *Channel, err error) {
+func (c *SOCKContainer) HttpProxy() (p *httputil.ReverseProxy, err error) {
+	// note, for debugging, you can directly contact the sock file like this:
+	// curl -XPOST --unix-socket ./ol.sock http:/test -d '{"some": "data"}'
+
 	sockPath := filepath.Join(c.scratchDir, "ol.sock")
 	if len(sockPath) > 108 {
 		return nil, fmt.Errorf("socket path length cannot exceed 108 characters (try moving cluster closer to the root directory")
@@ -75,33 +69,62 @@ func (c *SOCKContainer) Channel() (channel *Channel, err error) {
 	dial := func(proto, addr string) (net.Conn, error) {
 		return net.Dial("unix", sockPath)
 	}
-	tr := http.Transport{Dial: dial}
 
-	// the server name doesn't matter since we have a sock file
-	return &Channel{Url: "http://container/", Transport: tr}, nil
+	tr := &http.Transport{Dial: dial}
+	u, err := url.Parse("http://sock-container")
+	if err != nil {
+		panic(err)
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	proxy.Transport = tr
+	return proxy, nil
 }
 
-func (c *SOCKContainer) Start() (err error) {
-	defer func(start time.Time) {
-		if config.Conf.Timing {
-			log.Printf("create container took %v\n", time.Since(start))
+func (c *SOCKContainer) freshProc() (err error) {
+	// get FDs to cgroups
+	cgFiles := make([]*os.File, len(cgroupList))
+	for i, name := range cgroupList {
+		path := c.cg.Path(name, "tasks")
+		fd, err := syscall.Open(path, syscall.O_WRONLY, 0600)
+		if err != nil {
+			return err
 		}
-	}(time.Now())
+		cgFiles[i] = os.NewFile(uintptr(fd), path)
+		defer cgFiles[i].Close()
+	}
 
-	// FILE SYSTEM STEP 1: mount base
-	if err := os.Mkdir(c.containerRootDir, 0777); err != nil {
+	cmd := exec.Command(
+		"chroot", c.containerRootDir, "python3", "-u",
+		"sock2.py", "/host/bootstrap.py", strconv.Itoa(len(cgFiles)),
+	)
+	cmd.ExtraFiles = cgFiles
+
+	// TODO: route this to a file
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
 		return err
 	}
 
-	if err := syscall.Mount(c.baseDir, c.containerRootDir, "", BIND, ""); err != nil {
-		return fmt.Errorf("failed to bind root dir: %s -> %s :: %v\n", c.baseDir, c.containerRootDir, err)
+	// sock2.py forks off a process in a new container, so this
+	// won't block long
+	return cmd.Wait()
+}
+
+func (c *SOCKContainer) populateRoot() (err error) {
+	// FILE SYSTEM STEP 1: mount base
+	baseDir := common.Conf.SOCK_base_path
+	if err := syscall.Mount(baseDir, c.containerRootDir, "", common.BIND, ""); err != nil {
+		return fmt.Errorf("failed to bind root dir: %s -> %s :: %v\n", baseDir, c.containerRootDir, err)
 	}
 
-	if err := syscall.Mount("none", c.containerRootDir, "", BIND_RO, ""); err != nil {
+	if err := syscall.Mount("none", c.containerRootDir, "", common.BIND_RO, ""); err != nil {
 		return fmt.Errorf("failed to bind root dir RO: %s :: %v\n", c.containerRootDir, err)
 	}
 
-	if err := syscall.Mount("none", c.containerRootDir, "", PRIVATE, ""); err != nil {
+	if err := syscall.Mount("none", c.containerRootDir, "", common.PRIVATE, ""); err != nil {
 		return fmt.Errorf("failed to make root dir private :: %v", err)
 	}
 
@@ -109,331 +132,227 @@ func (c *SOCKContainer) Start() (err error) {
 	if c.codeDir != "" {
 		sbCodeDir := filepath.Join(c.containerRootDir, "handler")
 
-		if err := syscall.Mount(c.codeDir, sbCodeDir, "", BIND, ""); err != nil {
+		if err := syscall.Mount(c.codeDir, sbCodeDir, "", common.BIND, ""); err != nil {
 			return fmt.Errorf("failed to bind code dir: %s -> %s :: %v", c.codeDir, sbCodeDir, err.Error())
 		}
 
-		if err := syscall.Mount("none", sbCodeDir, "", BIND_RO, ""); err != nil {
+		if err := syscall.Mount("none", sbCodeDir, "", common.BIND_RO, ""); err != nil {
 			return fmt.Errorf("failed to bind code dir RO: %v", err.Error())
 		}
 	}
 
 	// FILE SYSTEM STEP 3: scratch dir (tmp and communication)
-	if err := os.MkdirAll(c.scratchDir, 0777); err != nil {
-		return err
-	}
-
 	tmpDir := filepath.Join(c.scratchDir, "tmp")
-	if err := os.Mkdir(tmpDir, 0777); err != nil {
+	if err := os.Mkdir(tmpDir, 0777); err != nil && !os.IsExist(err) {
 		return err
 	}
 
 	sbScratchDir := filepath.Join(c.containerRootDir, "host")
-	if err := syscall.Mount(c.scratchDir, sbScratchDir, "", BIND, ""); err != nil {
+	if err := syscall.Mount(c.scratchDir, sbScratchDir, "", common.BIND, ""); err != nil {
 		return fmt.Errorf("failed to bind scratch dir: %v", err.Error())
 	}
 
+	// TODO: cheaper to handle with symlink in lambda image?
 	sbTmpDir := filepath.Join(c.containerRootDir, "tmp")
-	if err := syscall.Mount(tmpDir, sbTmpDir, "", BIND, ""); err != nil {
+	if err := syscall.Mount(tmpDir, sbTmpDir, "", common.BIND, ""); err != nil {
 		return fmt.Errorf("failed to bind tmp dir: %v", err.Error())
 	}
 
-	pipe := filepath.Join(c.scratchDir, "init_pipe") // communicate with init process
-	if err := syscall.Mkfifo(pipe, 0777); err != nil {
-		return err
-	}
-
-	c.pipe, err = os.OpenFile(pipe, os.O_RDWR, 0777)
-	if err != nil {
-		return fmt.Errorf("Cannot open pipe: %v\n", err)
-	}
-
-	pipe = filepath.Join(c.scratchDir, "server_pipe") // communicate with lambda server
-	if err := syscall.Mkfifo(pipe, 0777); err != nil {
-		return err
-	}
-
-	// START INIT PROC (sets up namespaces)
-	initArgs := []string{c.unshareFlags, c.containerRootDir}
-	initArgs = append(initArgs, c.startCmd...)
-
-	c.initCmd = exec.Command(
-		"/usr/local/bin/sock-init",
-		initArgs...,
-	)
-
-	c.initCmd.Env = []string{fmt.Sprintf("ol.config=%s", config.SandboxConfJson())}
-	c.initCmd.Stderr = os.Stdout // for debugging
-
-	start := time.Now()
-	if err := c.initCmd.Start(); err != nil {
-		return err
-	}
-
-	// wait up to 5s for server sock_init to spawn
-	ready := make(chan string, 1)
-	defer close(ready)
-	go func() {
-		// message will be either 5 byte \0 padded pid (<65536), or "ready"
-		pid := make([]byte, 6)
-		n, err := c.pipe.Read(pid[:5])
-
-		// TODO: return early
-
-		if err != nil {
-			log.Printf("Cannot read from stdout of sock: %v\n", err)
-		} else if n != 5 {
-			log.Printf("Expect to read 5 bytes, only %d read\n", n)
-		} else {
-			ready <- string(pid[:bytes.IndexByte(pid, 0)])
-		}
-	}()
-
-	timeout := time.NewTimer(5 * time.Second)
-	defer timeout.Stop()
-
-	select {
-	case c.initPid = <-ready:
-		if config.Conf.Timing {
-			log.Printf("wait for sock_init took %v\n", time.Since(start))
-		}
-	case <-timeout.C:
-		// clean up go routine
-		if n, err := c.pipe.Write([]byte("timeo")); err != nil {
-			return err
-		} else if n != 5 {
-			return fmt.Errorf("Cannot write `timeo` to pipe\n")
-		}
-		return fmt.Errorf("sock_init failed to spawn after 5s")
-	}
-
-	// JOIN A CGROUP
-	cgId, err := c.cgf.GetCg(c.id)
-	if err != nil {
-		return err
-	}
-	c.cgId = cgId
-
-	if err := c.CGroupEnter(c.initPid); err != nil {
-		return err
-	}
-
-	c.status = state.Running
 	return nil
 }
 
-func (c *SOCKContainer) Stop() error {
-	start := time.Now()
-
-	// If we're using the PID namespace, we can just kill the init process
-	// and the OS will SIGKILL the rest. If not (i.e., for import cache
-	// containers), we need to kill them all.
-	if strings.Contains(c.unshareFlags, "p") {
-		pid, _ := strconv.Atoi(c.initPid)
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			return fmt.Errorf("failed to find init process with pid=%d :: %v", pid, err)
-		}
-		err = proc.Signal(syscall.SIGTERM)
-		if err != nil {
-			log.Printf("failed to send kill signal to init process pid=%d :: %v", pid, err)
-		}
-	} else {
-		// kill any remaining processes
-		procsPath := filepath.Join("/sys/fs/cgroup/memory", OLCGroupName, c.cgId, "cgroup.procs")
-		pids, err := ioutil.ReadFile(procsPath)
-		if err != nil {
-			return err
-		}
-
-		for _, pidStr := range strings.Split(strings.TrimSpace(string(pids[:])), "\n") {
-			if pidStr == "" {
-				break
-			}
-
-			if err := util.KillPIDStr(pidStr); err != nil {
-				log.Printf("failed to kill pid %v, cleanup may fail :: %v", err)
-			}
-		}
-	}
-
-	// wait for the initCmd to clean up its children
-	_, err := c.initCmd.Process.Wait()
-	if err != nil {
-		log.Printf("failed to wait on initCmd pid=%d :: %v", c.initCmd.Process.Pid, err)
-	}
-	if config.Conf.Timing {
-		log.Printf("kill processes took %v", time.Since(start))
-	}
-
-	c.status = state.Stopped
-	return nil
-}
-
-func (c *SOCKContainer) Pause() error {
-	freezerPath := filepath.Join("/sys/fs/cgroup/freezer", OLCGroupName, c.cgId, "freezer.state")
-	err := ioutil.WriteFile(freezerPath, []byte("FROZEN"), os.ModeAppend)
-	if err != nil {
+func (c *SOCKContainer) Pause() (err error) {
+	if err := c.cg.Pause(); err != nil {
 		return err
 	}
 
-	c.status = state.Paused
+	// drop mem limit to what is used when we're paused, because
+	// we know the Sandbox cannot allocate more when it's not
+	// schedulable.  Then release saved memory back to the pool.
+	oldLimit := c.cg.getMemLimitMB()
+	newLimit := c.cg.getMemUsageMB() + 1
+	if newLimit < oldLimit {
+		c.cg.setMemLimitMB(newLimit)
+		c.pool.mem.adjustAvailableMB(oldLimit - newLimit)
+	}
 	return nil
 }
 
-func (c *SOCKContainer) Unpause() error {
-	statePath := filepath.Join("/sys/fs/cgroup/freezer", OLCGroupName, c.cgId, "freezer.state")
+func (c *SOCKContainer) Unpause() (err error) {
+	// block until we have enough mem to upsize limit to the
+	// normal size before unpausing
+	oldLimit := c.cg.getMemLimitMB()
+	newLimit := common.Conf.Limits.Mem_mb
+	c.pool.mem.adjustAvailableMB(oldLimit - newLimit)
+	c.cg.setMemLimitMB(newLimit)
 
-	err := ioutil.WriteFile(statePath, []byte("THAWED"), os.ModeAppend)
-	if err != nil {
-		return err
-	}
-
-	return c.waitForUnpause(5 * time.Second)
+	return c.cg.Unpause()
 }
 
-func (c *SOCKContainer) waitForUnpause(timeout time.Duration) error {
-	// TODO: should we check parent_freezing to be sure?
-	selfFreezingPath := filepath.Join("/sys/fs/cgroup/freezer", OLCGroupName, c.cgId, "freezer.self_freezing")
-
-	start := time.Now()
-	for time.Since(start) < timeout {
-		freezerState, err := ioutil.ReadFile(selfFreezingPath)
-		if err != nil {
-			return fmt.Errorf("failed to check self_freezing state :: %v", err)
+func (c *SOCKContainer) Destroy() {
+	// kill all procs INSIDE the cgroup
+	t := common.T0("Destroy()/kill-procs")
+	if c.cg != nil {
+		c.printf("kill all procs in CG\n")
+		if err := c.cg.KillAllProcs(); err != nil {
+			panic(err)
 		}
-
-		if strings.TrimSpace(string(freezerState[:])) == "0" {
-			c.status = state.Running
-			return nil
-		}
-		time.Sleep(1 * time.Millisecond)
 	}
+	t.T1()
 
-	return fmt.Errorf("sock didn't unpause after %v", timeout)
-}
-
-func (c *SOCKContainer) Remove() error {
-	if config.Conf.Timing {
-		defer func(start time.Time) {
-			log.Printf("remove took %v\n", time.Since(start))
-		}(time.Now())
-	}
-
+	c.printf("unmount and remove dirs\n")
+	t = common.T0("Destroy()/detach-root")
 	if err := syscall.Unmount(c.containerRootDir, syscall.MNT_DETACH); err != nil {
-		log.Printf("unmount root dir %s failed :: %v\n", c.containerRootDir, err)
+		c.printf("unmount root dir %s failed :: %v\n", c.containerRootDir, err)
 	}
+	t.T1()
 
+	t = common.T0("Destroy()/remove-root")
 	if err := os.RemoveAll(c.containerRootDir); err != nil {
-		log.Printf("remove root dir %s failed :: %v\n", c.containerRootDir, err)
+		c.printf("remove root dir %s failed :: %v\n", c.containerRootDir, err)
 	}
+	t.T1()
 
-	if err := os.RemoveAll(c.scratchDir); err != nil {
-		log.Printf("remove host dir %s failed :: %v\n", c.scratchDir, err)
-	}
-
-	// remove cgroups
-	if err := c.cgf.PutCg(c.id, c.cgId); err != nil {
-		log.Printf("Unable to delete cgroups: %v", err)
-	}
-
-	return nil
+	c.decCgRefCount()
 }
 
-func (c *SOCKContainer) Logs() (string, error) {
-	// TODO(ed)
-	return "TODO", nil
-}
+// when the count goes to zero, it means (a) this container and (b)
+// all it's descendents are destroyed. Thus, it's safe to release it's
+// cgroups, and return the memory allocation to the memPool
+func (c *SOCKContainer) decCgRefCount() {
+	c.cgRefCount -= 1
+	c.printf("CG ref count decremented to %d", c.cgRefCount)
+	if c.cgRefCount == 0 {
+		c.cg.Release()
+		c.pool.mem.adjustAvailableMB(c.cg.getMemLimitMB())
 
-func (c *SOCKContainer) CGroupEnter(pid string) (err error) {
-	if pid == "" {
-		return fmt.Errorf("empty pid passed to cgroupenter")
+		if c.parent != nil {
+			c.parent.childExit(c)
+		}
 	}
 
-	// put process into each cgroup
-	for _, cgroup := range CGroupList {
-		tasksPath := filepath.Join("/sys/fs/cgroup/", cgroup, OLCGroupName, c.cgId, "tasks")
+	if c.cgRefCount < 0 {
+		panic("cgRefCount should not be able to go negative")
+	}
+}
 
-		err := ioutil.WriteFile(tasksPath, []byte(pid), os.ModeAppend)
+func (c *SOCKContainer) childExit(child Sandbox) {
+	delete(c.children, child.ID())
+	c.decCgRefCount()
+}
+
+// fork a new process from the Zygote in c, relocate it to be the server in dst
+func (c *SOCKContainer) fork(dst Sandbox) (err error) {
+	spareMB := c.cg.getMemLimitMB() - c.cg.getMemUsageMB()
+	if spareMB < 3 {
+		return fmt.Errorf("only %vMB of spare memory in parent, rejecting fork request (need at least 3MB)", spareMB)
+	}
+
+	dstSock := dst.(*safeSandbox).Sandbox.(*SOCKContainer)
+
+	origPids, err := c.cg.GetPIDs()
+	if err != nil {
+		return err
+	}
+
+	root, err := os.Open(dstSock.containerRootDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
+	cg := dstSock.cg
+	memCG, err := os.OpenFile(cg.Path("memory", "tasks"), os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer memCG.Close()
+
+	t := common.T0("forkRequest")
+	err = c.forkRequest(fmt.Sprintf("%s/ol.sock", c.scratchDir), root, memCG)
+	if err != nil {
+		return err
+	}
+	t.T1()
+
+	// move new PIDs to new cgroup.
+	//
+	// Make multiple passes in case new processes are being
+	// spawned (TODO: better way to do this?  This lets a forking
+	// process potentially kill our cache entry, which isn't
+	// great).
+	t = common.T0("move-to-cg-after-fork")
+	for {
+		currPids, err := c.cg.GetPIDs()
 		if err != nil {
 			return err
 		}
-	}
 
+		moved := 0
+
+		for _, pid := range currPids {
+			isOrig := false
+			for _, origPid := range origPids {
+				if pid == origPid {
+					isOrig = true
+					break
+				}
+			}
+			if !isOrig {
+				if err = dstSock.cg.AddPid(pid); err != nil {
+					return err
+				}
+				moved += 1
+			}
+		}
+
+		if moved == 0 {
+			break
+		}
+	}
+	t.T1()
+
+	c.children[dst.ID()] = dst
+	c.cgRefCount += 1
 	return nil
 }
 
-func (c *SOCKContainer) NSPid() string {
-	return c.initPid
+func (c *SOCKContainer) Status(key SandboxStatus) (string, error) {
+	switch key {
+	case StatusMemFailures:
+		return strconv.FormatBool(c.cg.ReadInt("memory", "memory.failcnt") > 0), nil
+	default:
+		return "", STATUS_UNSUPPORTED
+	}
 }
 
-func (c *SOCKContainer) ID() string {
-	return c.id
+func (c *SOCKContainer) Meta() *SandboxMeta {
+	return c.meta
 }
 
-func (c *SOCKContainer) RunServer() error {
-	pid, err := strconv.Atoi(c.initPid)
-	if err != nil {
-		log.Printf("bad initPid string: %s :: %v", c.initPid, err)
-		return err
+func (c *SOCKContainer) DebugString() string {
+	var s string = fmt.Sprintf("SOCK %s\n", c.ID())
+
+	s += fmt.Sprintf("ROOT DIR: %s\n", c.containerRootDir)
+
+	s += fmt.Sprintf("HOST DIR: %s\n", c.scratchDir)
+
+	if pids, err := c.cg.GetPIDs(); err == nil {
+		s += fmt.Sprintf("CGROUP PIDS: %s\n", strings.Join(pids, ", "))
+	} else {
+		s += fmt.Sprintf("CGROUP PIDS: unknown (%s)\n", err)
 	}
 
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		log.Printf("failed to find initPid process with pid=%d :: %v", pid, err)
-		return err
+	s += fmt.Sprintf("CGROUPS: %s\n", c.cg.Path("<RESOURCE>", ""))
+
+	if state, err := ioutil.ReadFile(c.cg.Path("freezer", "freezer.state")); err == nil {
+		s += fmt.Sprintf("FREEZE STATE: %s", state)
+	} else {
+		s += fmt.Sprintf("FREEZE STATE: unknown (%s)\n", err)
 	}
 
-	ready := make(chan bool, 1)
-	defer close(ready)
-	go func() {
-		// wait for signal handler to be "ready"
-		buf := make([]byte, 5)
-		_, err = c.pipe.Read(buf)
-		if err != nil {
-			log.Fatalf("Cannot read from stdout of sock: %v\n", err)
-		} else if string(buf) != "ready" {
-			log.Fatalf("In sockContainer: Expect to see `ready` but sees %s\n", string(buf))
-		}
-		ready <- true
-	}()
+	s += fmt.Sprintf("MEMORY USED: %d of %d MB\n",
+		c.cg.getMemUsageMB(), c.cg.getMemLimitMB())
 
-	// wait up to 5s for SOCK server to spawn
-	timeout := time.NewTimer(5 * time.Second)
-	defer timeout.Stop()
-
-	start := time.Now()
-	select {
-	case <-ready:
-		if config.Conf.Timing {
-			log.Printf("wait for init signal handler took %v\n", time.Since(start))
-		}
-	case <-timeout.C:
-		if n, err := c.pipe.Write([]byte("timeo")); err != nil {
-			return err
-		} else if n != 5 {
-			return fmt.Errorf("Cannot write `timeo` to pipe\n")
-		}
-		return fmt.Errorf("sock_init failed to spawn after 5s")
-	}
-
-	err = proc.Signal(syscall.SIGUSR1)
-	if err != nil {
-		log.Printf("failed to send SIGUSR1 to pid=%d :: %v", pid, err)
-		return err
-	}
-
-	return nil
-}
-
-func (c *SOCKContainer) MemoryCGroupPath() string {
-	return fmt.Sprintf("/sys/fs/cgroup/memory/%s/%s/", OLCGroupName, c.cgId)
-}
-
-func (c *SOCKContainer) RootDir() string {
-	return c.containerRootDir
-}
-
-func (c *SOCKContainer) HostDir() string {
-	return c.scratchDir
+	return s
 }

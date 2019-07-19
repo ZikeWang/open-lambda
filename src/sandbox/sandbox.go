@@ -1,76 +1,43 @@
 package sandbox
 
 import (
-	"net/http"
+	"fmt"
+	"strings"
+
+	"github.com/open-lambda/open-lambda/ol/common"
 )
 
-/*
-Defines interfaces for sandboxing methods (e.g., container, unikernel).
-Currently, only containers are supported. No need to increase complexity by
-generalizing for other sandboxing methods before they are implemented.
-*/
+func SandboxPoolFromConfig(name string, sizeMb int) (cf SandboxPool, err error) {
+	if common.Conf.Sandbox == "docker" {
+		return NewDockerPool("", nil)
+	} else if common.Conf.Sandbox == "sock" {
+		mem := NewMemPool(name, sizeMb)
+		pool, err := NewSOCKPool(name, mem)
+		if err != nil {
+			return nil, err
+		}
+		NewSOCKEvictor(pool)
+		return pool, nil
+	}
 
-import (
-	"github.com/open-lambda/open-lambda/ol/handler/state"
-)
-
-const OLCGroupName = "openlambda"
-
-var CGroupList []string = []string{"blkio", "cpu", "devices", "freezer", "hugetlb", "memory", "perf_event", "systemd"}
-
-type Channel struct {
-	Url       string
-	Transport http.Transport
+	return nil, fmt.Errorf("invalid sandbox type: '%s'", common.Conf.Sandbox)
 }
 
-type Sandbox interface{}
+func fillMetaDefaults(meta *SandboxMeta) *SandboxMeta {
+	if meta == nil {
+		meta = &SandboxMeta{}
+	}
+	if meta.MemLimitMB == 0 {
+		meta.MemLimitMB = common.Conf.Limits.Mem_mb
+	}
+	return meta
+}
 
-type Container interface {
-	Sandbox
+func (meta *SandboxMeta) String() string {
+	return fmt.Sprintf("<installs=[%s], imports=[%s], mem-limit-mb=%v>",
+		strings.Join(meta.Installs, ","), strings.Join(meta.Imports, ","), meta.MemLimitMB)
+}
 
-	// Starts the container.
-	Start() error
-
-	// Stops the container.
-	Stop() error
-
-	// Pauses the container.
-	Pause() error
-
-	// Unpauses the container.
-	Unpause() error
-
-	// Frees all resources associated with the container.
-	// Assumes that the container has been stopped.
-	Remove() error
-
-	// Return recent logs for the container.
-	Logs() (string, error)
-
-	// Get current state of the container.
-	State() (state.HandlerState, error)
-
-	// Communication channel to forward requests.
-	Channel() (*Channel, error)
-
-	// Return ID of the container.
-	ID() string
-
-	// Start the Python server inside of the container.
-	RunServer() error
-
-	// Path to this container's memory cgroup for accounting.
-	MemoryCGroupPath() string
-
-	// Directory that new processes need to chroot into from host's view.
-	RootDir() string
-
-	// Directory used by the worker to communicate with container.
-	HostDir() string
-
-	// Put the given process into the cgroups of the container
-	CGroupEnter(pid string) error
-
-	// PID of a process in the container's namespaces (for joining)
-	NSPid() string
+func (e SockError) Error() string {
+	return string(e)
 }

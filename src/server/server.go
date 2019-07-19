@@ -1,223 +1,30 @@
 package server
 
 import (
-	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
-	"time"
 
-	"github.com/open-lambda/open-lambda/ol/benchmarker"
-	"github.com/open-lambda/open-lambda/ol/config"
-	"github.com/open-lambda/open-lambda/ol/handler"
+	"github.com/open-lambda/open-lambda/ol/common"
 )
 
 const (
 	RUN_PATH    = "/run/"
-	STATUS_PATH = "/status"
 	PID_PATH    = "/pid"
+	STATUS_PATH = "/status"
+	STATS_PATH  = "/stats"
+	DEBUG_PATH  = "/debug"
 )
 
-// Server is a worker server that listens to run lambda requests and forward
-// these requests to its sandboxes.
-type Server struct {
-	lambda_mgr *handler.LambdaMgr
-}
-
-// httpErr is a wrapper for an http error and the return code of the request.
-type httpErr struct {
-	msg  string
-	code int
-}
-
-// newHttpErr creates an httpErr.
-func newHttpErr(msg string, code int) *httpErr {
-	return &httpErr{msg: msg, code: code}
-}
-
-// NewServer creates a server based on the passed config."
-func NewServer() (*Server, error) {
-	lambda_mgr, err := handler.NewLambdaMgr()
-	if err != nil {
-		return nil, err
-	}
-
-	server := &Server{
-		lambda_mgr: lambda_mgr,
-	}
-
-	return server, nil
-}
-
-// ForwardToSandbox forwards a run lambda request to a sandbox.
-func (s *Server) ForwardToSandbox(linst *handler.LambdaInstance, r *http.Request, input []byte) ([]byte, *http.Response, error) {
-	channel, err := linst.RunStart()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	defer linst.RunFinish()
-
-	if config.Conf.Timing {
-		defer func(start time.Time) {
-			log.Printf("forward request took %v\n", time.Since(start))
-		}(time.Now())
-	}
-
-	// forward request to sandbox.  r and w are the server
-	// request and response respectively.  r2 and w2 are the
-	// sandbox request and response respectively.
-	url := fmt.Sprintf("%s%s", channel.Url, r.URL.Path)
-
-	// TODO(tyler): some sort of smarter backoff.  Or, a better
-	// way to detect a started sandbox.
-	max_tries := 10
-	errors := []error{}
-	for tries := 1; ; tries++ {
-		b := benchmarker.GetBenchmarker()
-		var t *benchmarker.Timer
-		if b != nil {
-			t = b.CreateTimer("lambda request", "us")
-		}
-
-		r2, err := http.NewRequest(r.Method, url, bytes.NewReader(input))
-		if err != nil {
-			return nil, nil, err
-		}
-
-		r2.Close = true
-		r2.Header.Set("Content-Type", r.Header.Get("Content-Type"))
-		client := &http.Client{Transport: &channel.Transport}
-		if t != nil {
-			t.Start()
-		}
-		w2, err := client.Do(r2)
-		if err != nil {
-			if t != nil {
-				t.Error("Request Failed")
-			}
-			errors = append(errors, err)
-			if tries == max_tries {
-				log.Printf("Forwarding request to container failed after %v tries\n", max_tries)
-				for i, item := range errors {
-					log.Printf("Attempt %v: %v\n", i, item.Error())
-				}
-				return nil, nil, err
-			}
-			time.Sleep(time.Duration(tries*100) * time.Millisecond)
-			continue
-		} else {
-			if t != nil {
-				t.End()
-			}
-		}
-
-		defer w2.Body.Close()
-		wbody, err := ioutil.ReadAll(w2.Body)
-		if err != nil {
-			return nil, nil, err
-		}
-		return wbody, w2, nil
-	}
-}
-
-// RunLambdaErr handles the run lambda request and return an http error if any.
-func (s *Server) RunLambdaErr(w http.ResponseWriter, r *http.Request) *httpErr {
-	// components represent run[0]/<name_of_sandbox>[1]/<extra_things>...
-	// ergo we want [1] for name of sandbox
-	urlParts := getUrlComponents(r)
-	if len(urlParts) < 2 {
-		return newHttpErr(
-			"Name of image to run required",
-			http.StatusBadRequest)
-	}
-	img := urlParts[1]
-	i := strings.Index(img, "?")
-	if i >= 0 {
-		img = img[:i-1]
-	}
-
-	// read request
-	rbody := []byte{}
-	if r.Body != nil {
-		defer r.Body.Close()
-		var err error
-		rbody, err = ioutil.ReadAll(r.Body)
-		if err != nil {
-			return newHttpErr(
-				err.Error(),
-				http.StatusInternalServerError)
-		}
-	}
-
-	// forward to sandbox
-	var linst *handler.LambdaInstance
-	if rv, err := s.lambda_mgr.Get(img); err != nil {
-		return newHttpErr(err.Error(), http.StatusInternalServerError)
-	} else {
-		linst = rv
-	}
-
-	wbody, w2, err := s.ForwardToSandbox(linst, r, rbody)
-	if err != nil {
-		return newHttpErr(err.Error(), http.StatusInternalServerError)
-	}
-
-	w.WriteHeader(w2.StatusCode)
-
-	if _, err := w.Write(wbody); err != nil {
-		return newHttpErr(
-			err.Error(),
-			http.StatusInternalServerError)
-	}
-
-	return nil
-}
-
-// RunLambda expects POST requests like this:
-//
-// curl -X POST localhost:8080/run/<lambda-name> -d '{}'
-func (s *Server) RunLambda(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Receive request to %s\n", r.URL.Path)
-
-	// write response headers
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods",
-		"GET, PUT, POST, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers",
-		"Content-Type, Content-Range, Content-Disposition, Content-Description, X-Requested-With")
-
-	if r.Method == "OPTIONS" {
-		w.WriteHeader(http.StatusOK)
-	} else {
-		if err := s.RunLambdaErr(w, r); err != nil {
-			log.Printf("could not handle request: %s\n", err.msg)
-			http.Error(w, err.msg, err.code)
-		}
-	}
-
-}
-
-// Status writes "ready" to the response.
-func (s *Server) Status(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Receive request to %s\n", r.URL.Path)
-
-	wbody := []byte("ready\n")
-	if _, err := w.Write(wbody); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-	}
-
-	s.lambda_mgr.Dump()
-}
-
 // GetPid returns process ID, useful for making sure we're talking to the expected server
-func (s *Server) GetPid(w http.ResponseWriter, r *http.Request) {
+func GetPid(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Receive request to %s\n", r.URL.Path)
 
 	wbody := []byte(strconv.Itoa(os.Getpid()) + "\n")
@@ -226,61 +33,101 @@ func (s *Server) GetPid(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// getUrlComponents parses request URL into its "/" delimated components
-func getUrlComponents(r *http.Request) []string {
-	path := r.URL.Path
+// Status writes "ready" to the response.
+func Status(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Receive request to %s\n", r.URL.Path)
 
-	// trim prefix
-	if strings.HasPrefix(path, "/") {
-		path = path[1:]
+	if _, err := w.Write([]byte("ready\n")); err != nil {
+		log.Printf("error in Status: %v", err)
 	}
-
-	// trim trailing "/"
-	if strings.HasSuffix(path, "/") {
-		path = path[:len(path)-1]
-	}
-
-	components := strings.Split(path, "/")
-	return components
 }
 
-func (s *Server) cleanup() {
-	s.lambda_mgr.Cleanup()
+func Stats(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Receive request to %s\n", r.URL.Path)
+	snapshot := common.SnapshotStats()
+	if b, err := json.MarshalIndent(snapshot, "", "\t"); err != nil {
+		panic(err)
+	} else {
+		w.Write(b)
+	}
 }
 
-func Main(config_path string) {
-	err := config.LoadFile(config_path)
+func Main() (err error) {
+	var s interface {
+		cleanup()
+	}
+
+	pidPath := filepath.Join(common.Conf.Worker_dir, "worker.pid")
+	if _, err := os.Stat(pidPath); err == nil {
+		return fmt.Errorf("previous worker may be running, %s already exists", pidPath)
+	} else if !os.IsNotExist(err) {
+		// we were hoping to get the not-exist error, but got something else unexpected
+		return err
+	}
+
+	// start with a fresh env
+	if err := os.RemoveAll(common.Conf.Worker_dir); err != nil {
+		return err
+	} else if err := os.MkdirAll(common.Conf.Worker_dir, 0700); err != nil {
+		return err
+	}
+
+	log.Printf("save PID %d to file %s", os.Getpid(), pidPath)
+	if err := ioutil.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0644); err != nil {
+		return err
+	}
+
+	defer func() {
+		if err != nil {
+			log.Printf("remove PID file %s", pidPath)
+			os.Remove(pidPath)
+		}
+	}()
+
+	// things shared by all servers
+	http.HandleFunc(PID_PATH, GetPid)
+	http.HandleFunc(STATUS_PATH, Status)
+	http.HandleFunc(STATS_PATH, Stats)
+
+	switch common.Conf.Server_mode {
+	case "lambda":
+		s, err = NewLambdaServer()
+	case "sock":
+		s, err = NewSOCKServer()
+	default:
+		return fmt.Errorf("unknown Server_mode %s", common.Conf.Server_mode)
+	}
+
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	log.Printf("Config: %+v", config.Conf)
-
-	server, err := NewServer()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if config.Conf.Benchmark_file != "" {
-		benchmarker.CreateBenchmarkerSingleton(config.Conf.Benchmark_file)
-	}
-
-	port := fmt.Sprintf(":%s", config.Conf.Worker_port)
-	http.HandleFunc(RUN_PATH, server.RunLambda)
-	http.HandleFunc(STATUS_PATH, server.Status)
-	http.HandleFunc(PID_PATH, server.GetPid)
-
-	log.Printf("Execute handler by POSTing to localhost%s%s%s\n", port, RUN_PATH, "<lambda>")
-	log.Printf("Get status by sending request to localhost%s%s\n", port, STATUS_PATH)
 
 	// clean up if signal hits us
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	signal.Notify(c, os.Interrupt, syscall.SIGINT)
-	go func(s *Server) {
+	go func() {
 		<-c
+		log.Printf("received kill signal, cleaning up")
 		s.cleanup()
-		os.Exit(1)
-	}(server)
 
+		statsPath := filepath.Join(common.Conf.Worker_dir, "stats.json")
+		snapshot := common.SnapshotStats()
+		log.Printf("save stats to %s", statsPath)
+		if s, err := json.MarshalIndent(snapshot, "", "\t"); err != nil {
+			log.Printf("error: %s", err)
+		} else if err := ioutil.WriteFile(statsPath, s, 0644); err != nil {
+			log.Printf("error: %s", err)
+		}
+
+		log.Printf("remove worker.pid")
+		os.Remove(pidPath)
+
+		log.Printf("exiting")
+		os.Exit(1)
+	}()
+
+	port := fmt.Sprintf(":%s", common.Conf.Worker_port)
 	log.Fatal(http.ListenAndServe(port, nil))
+	panic("ListenAndServe should never return")
 }

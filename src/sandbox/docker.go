@@ -17,13 +17,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"time"
 
 	docker "github.com/fsouza/go-dockerclient"
-	"github.com/open-lambda/open-lambda/ol/benchmarker"
-	"github.com/open-lambda/open-lambda/ol/handler/state"
 )
 
 // DockerContainer is a sandbox inside a docker container.
@@ -34,21 +34,28 @@ type DockerContainer struct {
 	container *docker.Container
 	client    *docker.Client
 	installed map[string]bool
-	cache     bool
+	meta      *SandboxMeta
 }
 
-// NewDockerContainer creates a DockerContainer.
-func NewDockerContainer(host_id, hostDir string, cache bool, container *docker.Container, client *docker.Client) *DockerContainer {
-	sandbox := &DockerContainer{
-		host_id:   host_id,
-		hostDir:   hostDir,
-		container: container,
-		client:    client,
-		installed: make(map[string]bool),
-		cache:     cache,
-	}
+type HandlerState int
 
-	return sandbox
+const (
+	Unitialized HandlerState = iota
+	Running
+	Paused
+)
+
+func (h HandlerState) String() string {
+	switch h {
+	case Unitialized:
+		return "unitialized"
+	case Running:
+		return "running"
+	case Paused:
+		return "paused"
+	default:
+		panic("Unknown state!")
+	}
 }
 
 // dockerError adds details (sandbox log, state, etc.) to an error.
@@ -84,26 +91,26 @@ func (c *DockerContainer) InspectUpdate() error {
 }
 
 // State returns the state of the Docker sandbox.
-func (c *DockerContainer) State() (hstate state.HandlerState, err error) {
+func (c *DockerContainer) State() (hstate HandlerState, err error) {
 	if err := c.InspectUpdate(); err != nil {
 		return hstate, err
 	}
 
 	if c.container.State.Running {
 		if c.container.State.Paused {
-			hstate = state.Paused
+			hstate = Paused
 		} else {
-			hstate = state.Running
+			hstate = Running
 		}
 	} else {
-		hstate = state.Stopped
+		return hstate, fmt.Errorf("unexpected state")
 	}
 
 	return hstate, nil
 }
 
 // Channel returns a file socket channel for direct communication with the sandbox.
-func (c *DockerContainer) Channel() (channel *Channel, err error) {
+func (c *DockerContainer) HttpProxy() (p *httputil.ReverseProxy, err error) {
 	sockPath := filepath.Join(c.hostDir, "ol.sock")
 	if len(sockPath) > 108 {
 		return nil, fmt.Errorf("socket path length cannot exceed 108 characters (try moving cluster closer to the root directory")
@@ -112,31 +119,23 @@ func (c *DockerContainer) Channel() (channel *Channel, err error) {
 	dial := func(proto, addr string) (net.Conn, error) {
 		return net.Dial("unix", sockPath)
 	}
-	tr := http.Transport{Dial: dial}
 
-	// the server name doesn't matter since we have a sock file
-	return &Channel{Url: "http://container/", Transport: tr}, nil
+	tr := &http.Transport{Dial: dial}
+	u, err := url.Parse("http://sock-container")
+	if err != nil {
+		panic(err)
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	proxy.Transport = tr
+	return proxy, nil
 }
 
 // Start starts the container.
-func (c *DockerContainer) Start() error {
-	b := benchmarker.GetBenchmarker()
-	var t *benchmarker.Timer
-	if b != nil {
-		t = b.CreateTimer("Start docker container", "ms")
-		t.Start()
-	}
-
+func (c *DockerContainer) start() error {
 	if err := c.client.StartContainer(c.container.ID, nil); err != nil {
 		log.Printf("failed to start container with err %v\n", err)
-		if t != nil {
-			t.Error("Failed to start docker container")
-		}
 		return c.dockerError(err)
-	}
-
-	if t != nil {
-		t.End()
 	}
 
 	container, err := c.client.InspectContainer(c.container.ID)
@@ -150,8 +149,50 @@ func (c *DockerContainer) Start() error {
 	return nil
 }
 
-// Stop stops the container.
-func (c *DockerContainer) Stop() error {
+// Pause pauses the container.
+func (c *DockerContainer) Pause() error {
+	st, err := c.State()
+	if err != nil {
+		return err
+	} else if st == Paused {
+		return nil
+	}
+
+	if err := c.client.PauseContainer(c.container.ID); err != nil {
+		log.Printf("failed to pause container with error %v\n", err)
+		return c.dockerError(err)
+	}
+
+	return nil
+}
+
+// Unpause unpauses the container.
+func (c *DockerContainer) Unpause() error {
+	st, err := c.State()
+	if err != nil {
+		return err
+	} else if st == Running {
+		return nil
+	}
+
+	if err := c.client.UnpauseContainer(c.container.ID); err != nil {
+		log.Printf("failed to unpause container %s with err %v\n", c.container.Name, err)
+		return c.dockerError(err)
+	}
+
+	return nil
+}
+
+func (c *DockerContainer) Destroy() {
+	if err := c.destroy(); err != nil {
+		panic(fmt.Sprintf("Failed to cleanup container %v: %v", c.container.ID, err))
+	}
+}
+
+// frees all resources associated with the lambda
+func (c *DockerContainer) destroy() error {
+	c.Unpause()
+
 	// TODO(tyler): is there any advantage to trying to stop
 	// before killing?  (i.e., use SIGTERM instead SIGKILL)
 	opts := docker.KillContainerOptions{ID: c.container.ID}
@@ -160,56 +201,6 @@ func (c *DockerContainer) Stop() error {
 		return c.dockerError(err)
 	}
 
-	return nil
-}
-
-// Pause pauses the container.
-func (c *DockerContainer) Pause() error {
-	b := benchmarker.GetBenchmarker()
-	var t *benchmarker.Timer
-	if b != nil {
-		t = b.CreateTimer("Pause docker container", "ms")
-		t.Start()
-	}
-	if err := c.client.PauseContainer(c.container.ID); err != nil {
-		log.Printf("failed to pause container with error %v\n", err)
-		if t != nil {
-			t.Error("Failed to pause docker container")
-		}
-		return c.dockerError(err)
-	}
-	if t != nil {
-		t.End()
-	}
-	return nil
-}
-
-// Unpause unpauses the container.
-func (c *DockerContainer) Unpause() error {
-	b := benchmarker.GetBenchmarker()
-	var t *benchmarker.Timer
-	if b != nil {
-		t = b.CreateTimer("Unpause docker container", "ms")
-		t.Start()
-	}
-
-	if err := c.client.UnpauseContainer(c.container.ID); err != nil {
-		log.Printf("failed to unpause container %s with err %v\n", c.container.Name, err)
-		if t != nil {
-			t.Error("Failed to unpause docker container")
-		}
-		return c.dockerError(err)
-	}
-
-	if t != nil {
-		t.End()
-	}
-
-	return nil
-}
-
-// Remove frees all resources associated with the lambda (stops the container if necessary).
-func (c *DockerContainer) Remove() error {
 	// remove sockets if they exist
 	if err := os.RemoveAll(filepath.Join(c.hostDir, "ol.sock")); err != nil {
 		return err
@@ -250,36 +241,6 @@ func (c *DockerContainer) Logs() (string, error) {
 	return ret, nil
 }
 
-// Put the passed process into the cgroup of this docker container.
-func (c *DockerContainer) CGroupEnter(pid string) (err error) {
-	b := benchmarker.GetBenchmarker()
-	var t *benchmarker.Timer
-	if b != nil {
-		t = b.CreateTimer("cgclassify process into docker container", "us")
-	}
-
-	controllers := "memory,cpu,devices,perf_event,cpuset,blkio,pids,freezer,net_cls,net_prio,hugetlb"
-	cgroupArg := fmt.Sprintf("%s:/docker/%s", controllers, c.container.ID)
-	cmd := exec.Command("cgclassify", "--sticky", "-g", cgroupArg, pid)
-
-	if t != nil {
-		t.Start()
-	}
-
-	if err := cmd.Run(); err != nil {
-		if t != nil {
-			t.Error("Failed to run cgclassify")
-		}
-		return err
-	}
-
-	if t != nil {
-		t.End()
-	}
-
-	return nil
-}
-
 // NSPid returns the pid of the first process of the docker container.
 func (c *DockerContainer) NSPid() string {
 	return c.nspid
@@ -293,11 +254,8 @@ func (c *DockerContainer) DockerID() string {
 	return c.container.ID
 }
 
-func (c *DockerContainer) RunServer() error {
+func (c *DockerContainer) runServer() error {
 	cmd := []string{"python3", "server.py"}
-	if c.cache {
-		cmd = append(cmd, "--cache")
-	}
 
 	execOpts := docker.CreateExecOptions{
 		AttachStdin:  false,
@@ -316,14 +274,66 @@ func (c *DockerContainer) RunServer() error {
 	return nil
 }
 
-func (c *DockerContainer) MemoryCGroupPath() string {
-	return fmt.Sprintf("/sys/fs/cgroup/memory/docker/%s/", c.container.ID)
-}
-
 func (c *DockerContainer) RootDir() string {
 	return "/"
 }
 
 func (c *DockerContainer) HostDir() string {
 	return c.hostDir
+}
+
+func (c *DockerContainer) DebugString() string {
+	return fmt.Sprintf("SANDBOX %s (DOCKER)\n", c.ID())
+}
+
+func (c *DockerContainer) fork(dst Sandbox) (err error) {
+	panic("DockerContainer does not implement cross-container forks")
+}
+
+func (c *DockerContainer) childExit(child Sandbox) {
+	panic("DockerContainers should not have children because fork is unsupported")
+}
+
+func waitForServerPipeReady(hostDir string) error {
+	// upon success, the goroutine will send nil; else, it will send the error
+	ready := make(chan error, 1)
+
+	go func() {
+		pipeFile := filepath.Join(hostDir, "server_pipe")
+		pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777)
+		if err != nil {
+			log.Printf("Cannot open pipe: %v\n", err)
+			return
+		}
+		defer pipe.Close()
+
+		// wait for "ready"
+		buf := make([]byte, 5)
+		_, err = pipe.Read(buf)
+		if err != nil {
+			ready <- fmt.Errorf("Cannot read from stdout of sandbox :: %v\n", err)
+		} else if string(buf) != "ready" {
+			ready <- fmt.Errorf("Expect to see `ready` but got %s\n", string(buf))
+		}
+		ready <- nil
+	}()
+
+	// TODO: make timeout configurable
+	timeout := time.NewTimer(20 * time.Second)
+	defer timeout.Stop()
+
+	select {
+	case err := <-ready:
+		return err
+	case <-timeout.C:
+		return fmt.Errorf("instance server failed to initialize after 20s")
+	}
+}
+
+func (c *DockerContainer) Status(key SandboxStatus) (string, error) {
+	return "", STATUS_UNSUPPORTED
+}
+
+func (c *DockerContainer) Meta() *SandboxMeta {
+	return c.meta
 }
