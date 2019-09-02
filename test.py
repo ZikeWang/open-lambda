@@ -12,7 +12,7 @@ curr_conf = None
 
 
 def post(path, data=None):
-    return requests.post('http://localhost:5000/'+path, json.dumps(data))
+    return requests.post('http://localhost:5000/'+path, json.dumps(data)) //dumps将dict转换为str格式，然后发送post(url, data)请求
 
 
 def raise_for_status(r):
