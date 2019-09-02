@@ -12,7 +12,7 @@ curr_conf = None
 
 
 def post(path, data=None):
-    return requests.post('http://localhost:5000/'+path, json.dumps(data)) //request_post
+    return requests.post('http://localhost:5000/'+path, json.dumps(data))
 
 
 def raise_for_status(r):
