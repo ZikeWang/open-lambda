@@ -38,7 +38,7 @@ type CgroupPool struct {
 
 func NewCgroupPool(name string) (*CgroupPool, error) {
 	pool := &CgroupPool{
-		Name:     path.Base(common.Conf.Worker_dir) + "-" + name,
+		Name:     path.Base(path.Dir(common.Conf.Worker_dir)) + "-" + name,
 		ready:    make(chan *Cgroup, CGROUP_RESERVE),
 		recycled: make(chan *Cgroup, CGROUP_RESERVE),
 		quit:     make(chan chan bool),
@@ -77,8 +77,10 @@ func (pool *CgroupPool) NewCgroup() *Cgroup {
 }
 
 func (cg *Cgroup) printf(format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	log.Printf("%s [CGROUP %s: %s]", strings.TrimRight(msg, "\n"), cg.pool.Name, cg.Name)
+	if common.Conf.Trace.Cgroups {
+		msg := fmt.Sprintf(format, args...)
+		log.Printf("%s [CGROUP %s: %s]", strings.TrimRight(msg, "\n"), cg.pool.Name, cg.Name)
+	}
 }
 
 func (cg *Cgroup) Release() {
@@ -91,13 +93,17 @@ func (cg *Cgroup) Release() {
 
 	// if there's room in the recycled channel, add it there.
 	// Otherwise, just delete it.
-	select {
-	case cg.pool.recycled <- cg:
-		cg.printf("release and recycle")
-	default:
-		cg.printf("release and destroy")
-		cg.destroy()
+	if common.Conf.Features.Reuse_cgroups {
+		select {
+		case cg.pool.recycled <- cg:
+			cg.printf("release and recycle")
+			return
+		default:
+		}
 	}
+
+	cg.printf("release and destroy")
+	cg.destroy()
 }
 
 func (cg *Cgroup) destroy() {
@@ -140,9 +146,11 @@ Loop:
 			cg.WriteInt("memory", "memory.failcnt", 0)
 			cg.Unpause()
 		default:
+			t := common.T0("fresh-cgroup")
 			cg = pool.NewCgroup()
 			cg.WriteInt("pids", "pids.max", int64(common.Conf.Limits.Procs))
 			cg.WriteInt("memory", "memory.swappiness", int64(common.Conf.Limits.Swappiness))
+			t.T1()
 		}
 
 		// add cgroup to ready queue
@@ -216,7 +224,7 @@ func (cg *Cgroup) TryWriteInt(resource, filename string, val int64) error {
 
 func (cg *Cgroup) WriteInt(resource, filename string, val int64) {
 	if err := cg.TryWriteInt(resource, filename, val); err != nil {
-		panic(err)
+		panic(fmt.Sprintf("Error writing %v to %s of %s: %v", val, filename, resource, err))
 	}
 }
 
@@ -302,10 +310,7 @@ func (cg *Cgroup) setMemLimitMB(mb int) {
 
 	limitPath := cg.Path("memory", "memory.limit_in_bytes")
 	bytes := int64(mb) * 1024 * 1024
-	err := ioutil.WriteFile(limitPath, []byte(fmt.Sprintf("%d", bytes)), os.ModeAppend)
-	if err != nil {
-		panic(err)
-	}
+	cg.WriteInt("memory", "memory.limit_in_bytes", bytes)
 
 	// cgroup v1 documentation recommends reading back limit after
 	// writing, because it is only a suggestion (e.g., may get
@@ -356,44 +361,40 @@ func (cg *Cgroup) GetPIDs() ([]string, error) {
 	return strings.Split(pidStr, "\n"), nil
 }
 
-// CG may be in any state before (Paused/Unpaused), will be empty and Unpaused after
-func (cg *Cgroup) KillAllProcs() error {
-	if err := cg.Pause(); err != nil {
-		return err
-	}
-
+// CG most be paused beforehand
+func (cg *Cgroup) KillAllProcs() []string {
 	pids, err := cg.GetPIDs()
 	if err != nil {
-		return err
+		panic(err)
 	}
 
 	for _, pidStr := range pids {
 		pid, err := strconv.Atoi(pidStr)
 		if err != nil {
-			return fmt.Errorf("bad pid string: %s :: %v", pidStr, err)
+			panic(fmt.Errorf("bad pid string: %s :: %v", pidStr, err))
 		}
 
 		proc, err := os.FindProcess(pid)
 		if err != nil {
-			fmt.Errorf("failed to find process with pid: %d :: %v", pid, err)
+			panic(fmt.Errorf("failed to find process with pid: %d :: %v", pid, err))
 		}
 
 		// forced termination (not trappable)
 		err = proc.Signal(syscall.SIGKILL)
 		if err != nil {
-			fmt.Errorf("failed to send kill signal to process with pid: %d :: %v", pid, err)
+			panic(fmt.Errorf("failed to send kill signal to process with pid: %d :: %v", pid, err))
 		}
 	}
 
 	if err := cg.Unpause(); err != nil {
-		return err
+		panic(err)
 	}
 
 Loop:
 	for i := 0; ; i++ {
 		pids, err := cg.GetPIDs()
 		if err != nil {
-			return err
+			panic(err)
 		} else if len(pids) == 0 {
 			break Loop
 		} else if i%1000 == 0 {
@@ -402,5 +403,5 @@ Loop:
 		time.Sleep(1 * time.Millisecond)
 	}
 
-	return nil
+	return pids
 }

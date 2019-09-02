@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -56,29 +57,42 @@ func initOLDir(olPath string) (err error) {
 	}
 
 	// create a base directory to run sock handlers
-	fmt.Printf("Create lambda base at %v (may take several minutes)\n", common.Conf.SOCK_base_path)
-	err = dutil.DumpDockerImage(client, "lambda", common.Conf.SOCK_base_path)
+	base := common.Conf.SOCK_base_path
+	fmt.Printf("Create lambda base at %v (may take several minutes)\n", base)
+	err = dutil.DumpDockerImage(client, "lambda", base)
 	if err != nil {
 		return err
 	}
 
+	if err := os.Mkdir(path.Join(base, "handler"), 0700); err != nil {
+		return err
+	}
+
+	if err := os.Mkdir(path.Join(base, "host"), 0700); err != nil {
+		return err
+	}
+
+	if err := os.Mkdir(path.Join(base, "packages"), 0700); err != nil {
+		return err
+	}
+
 	// need this because Docker containers don't have a dns server in /etc/resolv.conf
-	dnsPath := filepath.Join(common.Conf.SOCK_base_path, "etc", "resolv.conf")
+	dnsPath := filepath.Join(base, "etc", "resolv.conf")
 	if err := ioutil.WriteFile(dnsPath, []byte("nameserver 8.8.8.8\n"), 0644); err != nil {
 		return err
 	}
 
-	path := filepath.Join(common.Conf.SOCK_base_path, "dev", "null")
+	path := filepath.Join(base, "dev", "null")
 	if err := exec.Command("mknod", "-m", "0644", path, "c", "1", "3").Run(); err != nil {
 		return err
 	}
 
-	path = filepath.Join(common.Conf.SOCK_base_path, "dev", "random")
+	path = filepath.Join(base, "dev", "random")
 	if err := exec.Command("mknod", "-m", "0644", path, "c", "1", "8").Run(); err != nil {
 		return err
 	}
 
-	path = filepath.Join(common.Conf.SOCK_base_path, "dev", "urandom")
+	path = filepath.Join(base, "dev", "urandom")
 	if err := exec.Command("mknod", "-m", "0644", path, "c", "1", "9").Run(); err != nil {
 		return err
 	}
@@ -180,6 +194,14 @@ func overrideOpts(confPath, overridePath, optsStr string) error {
 			if err != nil {
 				return err
 			}
+		case bool:
+			if strings.ToLower(val) == "true" {
+				c[key] = true
+			} else if strings.ToLower(val) == "false" {
+				c[key] = false
+			} else {
+				return fmt.Errorf("'%s' for %s not a valid boolean value", val, key)
+			}
 		default:
 			return fmt.Errorf("config values of type %T (%s) must be edited manually in the config file ", prev, key)
 		}
@@ -217,7 +239,6 @@ func worker(ctx *cli.Context) error {
 		fmt.Printf("using existing OL directory at %s\n", olPath)
 	}
 
-	// aoeu
 	confPath := filepath.Join(olPath, "config.json")
 	overrides := ctx.String("options")
 	if overrides != "" {
@@ -246,12 +267,17 @@ func worker(ctx *cli.Context) error {
 		attr := os.ProcAttr{
 			Files: []*os.File{nil, f, f},
 		}
-		cmd := []string{
-			os.Args[0],
-			"worker",
-			"-path=" + olPath,
+		cmd := []string{}
+		for _, arg := range os.Args {
+			if arg != "-d" && arg != "--detach" {
+				cmd = append(cmd, arg)
+			}
 		}
-		proc, err := os.StartProcess(os.Args[0], cmd, &attr)
+		binPath, err := exec.LookPath(os.Args[0])
+		if err != nil {
+			return err
+		}
+		proc, err := os.StartProcess(binPath, cmd, &attr)
 		if err != nil {
 			return err
 		}

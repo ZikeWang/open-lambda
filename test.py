@@ -366,6 +366,9 @@ def sock_churn(baseline, procs, seconds, fork):
     for i in range(baseline):
         r = post("create", {"code": echo_path, "leaf": True, "parent": parent})
         raise_for_status(r)
+        sandbox_id = r.text.strip()
+        r = post("pause/"+sandbox_id)
+        raise_for_status(r)
 
     t0 = time.time()
     with Pool(procs) as p:
@@ -431,11 +434,11 @@ def tests():
         ping_test()
 
         # do smoke tests under various configs
-        with TestConf(handler_cache_mb=500, import_cache_mb=0):
+        with TestConf(features={"import_cache": False}):
             install_tests()
-        with TestConf(handler_cache_mb=250, import_cache_mb=250):
+        with TestConf(mem_pool_mb=500):
             install_tests()
-        with TestConf(sandbox="docker", handler_cache_mb=500, import_cache_mb=0):
+        with TestConf(sandbox="docker", features={"import_cache": False}):
             install_tests()
 
         # test resource limits
@@ -443,31 +446,29 @@ def tests():
         max_mem_alloc()
 
         # numpy pip install needs a larger mem cap
-        with TestConf(handler_cache_mb=250, import_cache_mb=250):
+        with TestConf(mem_pool_mb=500):
             numpy_test()
 
     # test SOCK directly (without lambdas)
-    with TestConf(server_mode="sock", handler_cache_mb=250, import_cache_mb=250):
+    with TestConf(server_mode="sock", mem_pool_mb=500):
         sock_churn(baseline=0, procs=1, seconds=5, fork=False)
-        sock_churn(baseline=0, procs=1, seconds=15, fork=True)
-        sock_churn(baseline=0, procs=15, seconds=15, fork=True)
-        # TODO: make these work (we don't have enough mem now)
-        #sock_churn(baseline=32, procs=1, seconds=15, fork=True)
-        #sock_churn(baseline=32, procs=15, seconds=15, fork=True)
-
+        sock_churn(baseline=0, procs=1, seconds=10, fork=True)
+        sock_churn(baseline=0, procs=15, seconds=10, fork=True)
+        sock_churn(baseline=32, procs=1, seconds=10, fork=True)
+        sock_churn(baseline=32, procs=15, seconds=10, fork=True)
 
     # make sure code updates get pulled within the cache time
     with tempfile.TemporaryDirectory() as reg_dir:
-        with TestConf(sandbox="sock", registry=reg_dir, registry_cache_ms=3000):
+        with TestConf(registry=reg_dir, registry_cache_ms=3000):
             update_code()
 
     # test heavy load
-    with TestConf(sandbox="sock", handler_cache_mb=250, import_cache_mb=250, registry=test_reg):
+    with TestConf(registry=test_reg):
         stress_one_lambda(procs=1, seconds=15)
         stress_one_lambda(procs=2, seconds=15)
         stress_one_lambda(procs=8, seconds=15)
 
-    with TestConf(sandbox="sock", handler_cache_mb=250, import_cache_mb=250):
+    with TestConf(features={"reuse_cgroups": True}):
         call_each_once(lambda_count=100, alloc_mb=1)
         call_each_once(lambda_count=1000, alloc_mb=10)
 
@@ -489,7 +490,8 @@ def main():
     run(['./ol', 'new', '-p='+OLDIR])
 
     # run tests with various configs
-    tests()
+    with TestConf(limits={"installer_mem_mb": 250}):
+        tests()
 
     # save test results
     passed = len([t for t in results["runs"] if t["pass"]])

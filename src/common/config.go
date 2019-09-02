@@ -40,8 +40,7 @@ type Config struct {
 	Pip_index string `json:"pip_mirror"`
 
 	// CACHE OPTIONS
-	Handler_cache_mb int `json:"handler_cache_mb"`
-	Import_cache_mb  int `json:"import_cache_mb"`
+	Mem_pool_mb int `json:"mem_pool_mb"`
 
 	// can be empty (use root zygote only), a JSON obj (specifying
 	// the tree), or a path (to a file specifying the tree)
@@ -56,8 +55,45 @@ type Config struct {
 	// which OCI implementation to use for the docker sandbox (e.g., runc or runsc)
 	Docker_runtime string `json:"docker_runtime"`
 
-	// settings to use for cgroups used by SOCK
-	Limits LimitsConfig `json:"limits"`
+	Limits   LimitsConfig   `json:"limits"`
+	Features FeaturesConfig `json:"features"`
+	Trace    TraceConfig    `json:"trace"`
+	Storage  StorageConfig  `json:"storage"`
+}
+
+type FeaturesConfig struct {
+	Reuse_cgroups       bool `json:"reuse_cgroups"`
+	Import_cache        bool `json:"import_cache"`
+	Downsize_paused_mem bool `json:"downsize_paused_mem"`
+}
+
+type TraceConfig struct {
+	Cgroups bool `json:"cgroups"`
+	Memory  bool `json:"memory"`
+	Evictor bool `json:"evictor"`
+	Package bool `json:"package"`
+}
+
+type StoreString string
+
+func (s StoreString) Mode() StoreMode {
+	switch s {
+	case "":
+		return STORE_REGULAR
+	case "memory":
+		return STORE_MEMORY
+	case "private":
+		return STORE_PRIVATE
+	default:
+		panic(fmt.Errorf("unexpected storage type: '%v'", s))
+	}
+}
+
+type StorageConfig struct {
+	// should be empty, "memory", or "private"
+	Root    StoreString `json:"root"`
+	Scratch StoreString `json:"scratch"`
+	Code    StoreString `json:"code"`
 }
 
 type LimitsConfig struct {
@@ -91,12 +127,7 @@ func LoadDefaults(olPath string) error {
 		return err
 	}
 	total_mb := uint64(in.Totalram) * uint64(in.Unit) / 1024 / 1024
-	handler_cache_mb := 250
-	import_cache_mb := 250
-	if int((total_mb-512)/2) > 250 {
-		handler_cache_mb = int((total_mb - 512) / 2)
-		import_cache_mb = int((total_mb - 512) / 2)
-	}
+	mem_pool_mb := Max(int(total_mb-500), 500)
 
 	Conf = &Config{
 		Worker_dir:        workerDir,
@@ -108,14 +139,22 @@ func LoadDefaults(olPath string) error {
 		Sandbox_config:    map[string]interface{}{},
 		SOCK_base_path:    baseImgDir,
 		Registry_cache_ms: 5000, // 5 seconds
-		Handler_cache_mb:  handler_cache_mb,
-		Import_cache_mb:   import_cache_mb,
+		Mem_pool_mb:       mem_pool_mb,
 		Import_cache_tree: "",
 		Limits: LimitsConfig{
 			Procs:            10,
 			Mem_mb:           50,
+			Installer_mem_mb: Max(250, Min(500, mem_pool_mb/2)),
 			Swappiness:       0,
-			Installer_mem_mb: 200,
+		},
+		Features: FeaturesConfig{
+			Import_cache:        true,
+			Downsize_paused_mem: true,
+		},
+		Storage: StorageConfig{
+			Root:    "private",
+			Scratch: "",
+			Code:    "",
 		},
 	}
 
@@ -157,13 +196,11 @@ func checkConf() error {
 		// So we need at least double a memory's needs,
 		// otherwise anything running will immediately be
 		// evicted.
-		min_mem := Conf.Limits.Installer_mem_mb + Conf.Limits.Mem_mb
-		if min_mem > Conf.Handler_cache_mb {
-			return fmt.Errorf("handler_cache_mb must be at least %d", min_mem)
-		}
-
-		if Conf.Import_cache_mb != 0 && min_mem > Conf.Import_cache_mb {
-			return fmt.Errorf("import_cache_mb (if used) must be at least %d", min_mem)
+		//
+		// TODO: revise evictor and relax this
+		min_mem := 2 * Max(Conf.Limits.Installer_mem_mb, Conf.Limits.Mem_mb)
+		if min_mem > Conf.Mem_pool_mb {
+			return fmt.Errorf("mem_pool_mb must be at least %d", min_mem)
 		}
 	} else if Conf.Sandbox == "docker" {
 		if Conf.Pkgs_dir == "" {
@@ -174,8 +211,8 @@ func checkConf() error {
 			return fmt.Errorf("Pkgs_dir cannot be relative")
 		}
 
-		if Conf.Import_cache_mb != 0 {
-			return fmt.Errorf("import_cache_mb must be 0 for docker Sandbox")
+		if Conf.Features.Import_cache {
+			return fmt.Errorf("features.import_cache must be disabled for docker Sandbox")
 		}
 	} else {
 		return fmt.Errorf("Unknown Sandbox type '%s'", Conf.Sandbox)
