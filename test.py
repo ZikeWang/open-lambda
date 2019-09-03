@@ -12,18 +12,20 @@ curr_conf = None
 
 
 def post(path, data=None):
-    return requests.post('http://localhost:5000/'+path, json.dumps(data)) //dumps将dict转换为str格式，然后发送post(url, data)请求
+    return requests.post('http://localhost:5000/'+path, json.dumps(data)) 
+    # dumps将dict转换为str格式，然后发送post(url, data)请求
 
 
 def raise_for_status(r):
     if r.status_code != 200:
         raise Exception("STATUS %d: %s" % (r.status_code, r.text))
+        # 如果返回的http状态码不是200(即成功处理了请求)，通过raise显式的触发异常
 
 
 def test_in_filter(name):
-    if len(sys.argv) < 2:
-        return True
-    return name in sys.argv[1:]
+    if len(sys.argv) < 2: # sys.argv[]用来获取命令行参数的，sys.argv[0]表示代码本身文件路径，所以参数从1开始为实际命令所带的参数
+        return True # 表示命令不带参数
+    return name in sys.argv[1:] # 如果参数name存在于切片sys.argv[1:]中则表达式为True
 
 
 def get_mem_stat_mb(stat):
@@ -35,11 +37,12 @@ def get_mem_stat_mb(stat):
                 return int(parts[1]) / 1024
     raise Exception('could not get stat')
 
+# 通过get_mem_stat_mb函数获取 “当前可用内存” 数据，超过函数中静态定义的限制后，执行系统调用
 def ol_oom_killer():
     while True:
         if get_mem_stat_mb('MemAvailable') < 128:
             print("out of memory, trying to kill OL")
-            os.system('pkill ol')
+            os.system('pkill ol') # os.system() 用于执行传入参数的指令，代替了手动在命令行输入
         time.sleep(1)
 
 def test(fn):
@@ -47,10 +50,12 @@ def test(fn):
         if len(args):
             raise Exception("positional args not supported for tests")
 
-        name = fn.__name__
+        name = fn.__name__ # 获取传入的函数的名称
 
-        if not test_in_filter(name):
-            return None
+        if not test_in_filter(name): # 当函数返回false时执行，即 len(sys.argv)>=2 && (name in sys.argv[1:])==false
+            return None # 也即：当命令显式的带有参数，而名为name的测试不在参数中，则不执行该name的测试
+
+		# 当命令行不带任何参数（执行所有测试），或当前name对应的函数名在参数列表时，往下执行
 
         print('='*40)
         if len(kwargs):
@@ -131,9 +136,9 @@ def put_conf(conf):
 
 
 def mounts():
-    output = check_output(["mount"])
-    output = str(output, "utf-8")
-    output = output.split("\n")
+    output = check_output(["mount"]) # subprocess.check_output函数会使用参数作为命令来运行，并返回命令执行后的输出结果。通过 mount 命令可以查看已挂载的文件系统，会输出丰富的信息
+    output = str(output, "utf-8") # 输出的结果不一定是string，所以要显式的转换
+    output = output.split("\n") # split函数指定了以 "\n" 为分隔符对字符串进行切片，即将原字符串类似于 "xxx\nxxx\nxxx\n" 的形式转换为 {'xxx', 'xxx', 'xxx'}
     return set(output)
 
         
