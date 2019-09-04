@@ -13,7 +13,7 @@ curr_conf = None
 
 def post(path, data=None):
     return requests.post('http://localhost:5000/'+path, json.dumps(data)) 
-    # dumps将dict转换为str格式，然后发送post(url, data)请求
+    # dumps将将Python对象编码成JSON字符串，然后发送post(url, data)请求
 
 
 def raise_for_status(r):
@@ -84,11 +84,11 @@ def test(fn):
             # run test/benchmark
             test_t0 = time.time()
             rv = fn(**kwargs)
-            test_t1 = time.time()
+            test_t1 = time.time() # 截至这里记录的是测试函数的执行时间
             result["seconds"] = test_t1 - test_t0
 
             result["pass"] = True
-        except Exception:
+        except Exception: # 该except子句的名字为Exception，匹配L51的Exception
             rv = None
             result["pass"] = False
             result["errors"].append(traceback.format_exc().split("\n"))
@@ -106,20 +106,20 @@ def test(fn):
                                      % (len(mounts0), len(mounts1), str(mounts1 - mounts0))])
 
         # get internal stats from OL
-        if os.path.exists(OLDIR+"/worker/stats.json"):
+        if os.path.exists(OLDIR+"/worker/stats.json"): # 用于判断括号里文件路径对应的文件是否存在
             with open(OLDIR+"/worker/stats.json") as f:
-                olstats = json.load(f)
+                olstats = json.load(f) # 将json格式（或者直接说是字符串）数据转换为字典
                 result["ol-stats"] = OrderedDict(sorted(list(olstats.items())))
 
-        total_t1 = time.time()
+        total_t1 = time.time() # 截至这里记录的是包括了测试函数的运行、执行后环境的清理、状态的获取等完整流程的总时间
         result["total_seconds"] = total_t1-total_t0
-        result["stats"] = rv
+        result["stats"] = rv # fn执行后有返回值？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？
 
         with open(os.path.join(OLDIR, "worker.out")) as f:
             result["worker_tail"] = f.read().split("\n")
             if result["pass"]:
                 # truncate because we probably won't use it for debugging
-                result["worker_tail"] = result["worker_tail"][-10:]
+                result["worker_tail"] = result["worker_tail"][-10:] # 从倒数第10个到最后，含头含尾；如果是[-10,-1]则包含最后一个
 
         results["runs"].append(result)
         print(json.dumps(result, indent=2))
@@ -127,30 +127,30 @@ def test(fn):
 
     return wrapper
 
-
+# 该函数将传入的参数写进 OLDIR/config.json ，并将curr_conf设置为该参数
 def put_conf(conf):
-    global curr_conf
+    global curr_conf # 使用global关键字后可以对该全局变量进行修改
     with open(os.path.join(OLDIR, "config.json"), "w") as f:
-        json.dump(conf, f, indent=2)
+        json.dump(conf, f, indent=2) # dump()与dumps()还是有点区别的，dump用于将dict类型的数据(第一个参数)转成str，并写入到json文件中(第二个参数)
     curr_conf = conf
 
-
+# 该函数用于把命令行mount命令执行后的结果存储到变量中
 def mounts():
     output = check_output(["mount"]) # subprocess.check_output函数会使用参数作为命令来运行，并返回命令执行后的输出结果。通过 mount 命令可以查看已挂载的文件系统，会输出丰富的信息
     output = str(output, "utf-8") # 输出的结果不一定是string，所以要显式的转换
     output = output.split("\n") # split函数指定了以 "\n" 为分隔符对字符串进行切片，即将原字符串类似于 "xxx\nxxx\nxxx\n" 的形式转换为 {'xxx', 'xxx', 'xxx'}
-    return set(output)
+    return set(output) # set() 函数创建一个无序不重复元素的集合
 
         
 @contextmanager
-def TestConf(**keywords):
+def TestConf(**keywords): # 关键词参数，是python中的可变参数，本质上是一个 dict，如 a=1
     with open(os.path.join(OLDIR, "config.json")) as f:
-        orig = json.load(f)
-    new = copy.deepcopy(orig)
-    for k in keywords:
+        orig = json.load(f) # 结果为字典
+    new = copy.deepcopy(orig) # 深复制是将被复制对象完全再复制一遍作为独立的新个体单独存在。所以改变原有被复制对象不会对已经复制出来的新对象产生影响。
+    for k in keywords: # 遍历字典时遍历的是键
         if not k in new:
             raise Exception("unknown config param: %s" % k)
-        if type(keywords[k]) == dict:
+        if type(keywords[k]) == dict: # 键对应的值也是字典，即keywords为嵌套的字典
             for k2 in keywords[k]:
                 new[k][k2] = keywords[k][k2]
         else:
