@@ -113,7 +113,7 @@ def test(fn):
 
         total_t1 = time.time() # 截至这里记录的是包括了测试函数的运行、执行后环境的清理、状态的获取等完整流程的总时间
         result["total_seconds"] = total_t1-total_t0
-        result["stats"] = rv # fn执行后有返回值？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？
+        result["stats"] = rv
 
         with open(os.path.join(OLDIR, "worker.out")) as f:
             result["worker_tail"] = f.read().split("\n")
@@ -130,7 +130,7 @@ def test(fn):
 # 该函数将传入的参数写进 OLDIR/config.json ，并将curr_conf设置为该参数
 def put_conf(conf):
     global curr_conf # 使用global关键字后可以对该全局变量进行修改
-    with open(os.path.join(OLDIR, "config.json"), "w") as f:
+    with open(os.path.join(OLDIR, "config.json"), "w") as f: # w为覆盖写模式
         json.dump(conf, f, indent=2) # dump()与dumps()还是有点区别的，dump用于将dict类型的数据(第一个参数)转成str，并写入到json文件中(第二个参数)
     curr_conf = conf
 
@@ -150,21 +150,21 @@ def TestConf(**keywords): # 关键词参数，是python中的可变参数，本�
     for k in keywords: # 遍历字典时遍历的是键
         if not k in new:
             raise Exception("unknown config param: %s" % k)
-        if type(keywords[k]) == dict: # 键对应的值也是字典，即keywords为嵌套的字典
+        if type(keywords[k]) == dict: # 键对应的值也是字典，即keywords为嵌套的字典。
             for k2 in keywords[k]:
-                new[k][k2] = keywords[k][k2]
+                new[k][k2] = keywords[k][k2] # 目的是将config.json中与dict参数键对应的配置项的值改为参数的值
         else:
-            new[k] = keywords[k]
+            new[k] = keywords[k] # 同上
 
     # setup
     print("PUSH conf:", keywords)
-    put_conf(new)
+    put_conf(new) # 通过覆盖写新实现前面的修改配置文件的目的
 
     yield new
 
     # cleanup
     print("POP conf:", keywords)
-    put_conf(orig)
+    put_conf(orig) # 通过将原始数据写回实现撤销修改clean回原状态
 
 
 def run(cmd):
@@ -188,7 +188,7 @@ def run(cmd):
 def install_tests():
     # we want to make sure we see the expected number of pip installs,
     # so we don't want installs lying around from before
-    rc = os.system('rm -rf test-dir/lambda/packages/*')
+    rc = os.system('rm -rf test-dir/lambda/packages/*') # os.system(cmd)用于在python中调用linux命令。执行成功返回0，否则返回一个错误码
     assert(rc == 0)
 
     # try something that doesn't install anything
