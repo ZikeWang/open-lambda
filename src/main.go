@@ -230,7 +230,7 @@ func worker(ctx *cli.Context) error {
 	}
 
 	// if `./ol new` not previously run, do that init now
-	if _, err := os.Stat(olPath); os.IsNotExist(err) {
+	if _, err := os.Stat(olPath); os.IsNotExist(err) { // go中os包中的 os.Stat(path) 返回一个描述path指定的文件对象的FileInfo；os.IsNotExist(err) 返回一个布尔值说明该错误是否表示一个文件或目录不存在
 		fmt.Printf("no OL directory found at %s\n", olPath)
 		if err := initOLDir(olPath); err != nil {
 			return err
@@ -240,8 +240,8 @@ func worker(ctx *cli.Context) error {
 	}
 
 	confPath := filepath.Join(olPath, "config.json")
-	overrides := ctx.String("options")
-	if overrides != "" {
+	overrides := ctx.String("options") // 获取option这个标志所带的参数值
+	if overrides != "" { // 如果带了参数，则进一步处理参数
 		overridesPath := confPath + ".overrides"
 		err = overrideOpts(confPath, overridesPath, overrides)
 		if err != nil {
@@ -260,11 +260,11 @@ func worker(ctx *cli.Context) error {
 	if detach {
 		// stdout+stderr both go to log
 		logPath := filepath.Join(olPath, "worker.out")
-		f, err := os.Create(logPath)
+		f, err := os.Create(logPath) // Create 采用模式0666（任何人都可读写，不可执行）创建一个名为 传入参数 logPath 的文件
 		if err != nil {
 			return err
 		}
-		attr := os.ProcAttr{
+		attr := os.ProcAttr{ // 结构体类型ProcAttr保管将被StartProcess函数用于一个新进程的属性
 			Files: []*os.File{nil, f, f},
 		}
 		cmd := []string{}

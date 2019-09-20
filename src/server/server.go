@@ -72,7 +72,7 @@ func Main() (err error) {
 		return err
 	}
 
-	log.Printf("save PID %d to file %s", os.Getpid(), pidPath)
+	log.Printf("save PID %d to file %s", os.Getpid(), pidPath) // Getpid方法返回调用者所在进程的进程ID
 	if err := ioutil.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0644); err != nil {
 		return err
 	}

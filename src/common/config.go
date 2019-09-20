@@ -133,7 +133,7 @@ func LoadDefaults(olPath string) error {
 		Worker_dir:        workerDir,
 		Server_mode:       "lambda",
 		Worker_port:       "5000",
-		Registry:          registryDir,
+		Registry:          registryDir, // 如L31，对应的json文本为 "resgistry"
 		Sandbox:           "sock",
 		Pkgs_dir:          packagesDir,
 		Sandbox_config:    map[string]interface{}{},
