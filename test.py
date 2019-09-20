@@ -31,13 +31,13 @@ def test_in_filter(name):
 def get_mem_stat_mb(stat):
     with open('/proc/meminfo') as f:
         for l in f:
-            if l.startswith(stat+":"):
-                parts = l.strip().split()
-                assert(parts[-1] == 'kB')
-                return int(parts[1]) / 1024
+            if l.startswith(stat+":"): # 对以传入的实参stat打头的那一行数据进行处理
+                parts = l.strip().split() # 使用空格作为分隔符对该行的字符串进行切片（中间为空的项会自动忽略）
+                assert(parts[-1] == 'kB') # 切片后该行有三项：stat、数值、'kb'，最后一项一定为字符串 'kb'，所以进行一次断言
+                return int(parts[1]) / 1024 # 将数值转化为以mb为单位的整型
     raise Exception('could not get stat')
 
-# 通过get_mem_stat_mb函数获取 “当前可用内存” 数据，超过函数中静态定义的限制后，执行系统调用
+# 通过运行get_mem_stat_mb函数获取 “当前可用内存” 数据，超过函数中静态定义的限制后，执行系统调用
 def ol_oom_killer():
     while True:
         if get_mem_stat_mb('MemAvailable') < 128:
@@ -170,13 +170,13 @@ def TestConf(**keywords): # 关键词参数，是python中的可变参数，本�
 def run(cmd):
     print("RUN", " ".join(cmd))
     try:
-        out = check_output(cmd, stderr=subprocess.STDOUT)
+        out = check_output(cmd, stderr=subprocess.STDOUT) # check_output返回的是子程序的执行结果，如果程序执行报错的话，会直接抛出异常CalledProcessError
         fail = False
     except subprocess.CalledProcessError as e:
-        out = e.output
+        out = e.output # 上面的异常当中会有output属性
         fail = True
 
-    out = str(out, 'utf-8')
+    out = str(out, 'utf-8') #不管是执行结果还是上面异常中的output属性，都是unicode编码，要当字符串使用的时候需要转码
     if len(out) > 500:
         out = out[:500] + "..."
 

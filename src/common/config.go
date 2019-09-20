@@ -121,19 +121,19 @@ func LoadDefaults(olPath string) error {
 	packagesDir := filepath.Join(baseImgDir, "packages")
 
 	// split anything above 512 MB evenly between handler and import cache
-	in := &syscall.Sysinfo_t{}
-	err := syscall.Sysinfo(in)
+	in := &syscall.Sysinfo_t{} // Sysinfo_t 是 “syscall” 库中的一个结构体类型，每一个域都保存了相关的系统信息
+	err := syscall.Sysinfo(in) // Sysinfo 是 “syscall” 库中一个以 Sysinfo_t 类型为参数的函数（https://cloud.tencent.com/developer/section/1144463）
 	if err != nil {
 		return err
 	}
-	total_mb := uint64(in.Totalram) * uint64(in.Unit) / 1024 / 1024
+	total_mb := uint64(in.Totalram) * uint64(in.Unit) / 1024 / 1024 // Totalram 是 Sysinfo_t 结构体中的一个域
 	mem_pool_mb := Max(int(total_mb-500), 500)
 
-	Conf = &Config{
+	Conf = &Config{ // 缺省时的默认设置
 		Worker_dir:        workerDir,
 		Server_mode:       "lambda",
 		Worker_port:       "5000",
-		Registry:          registryDir,
+		Registry:          registryDir, // 如L31，对应的json文本为 "resgistry"
 		Sandbox:           "sock",
 		Pkgs_dir:          packagesDir,
 		Sandbox_config:    map[string]interface{}{},
@@ -223,7 +223,7 @@ func checkConf() error {
 
 // SandboxConfJson marshals the Sandbox_config of the Config into a JSON string.
 func SandboxConfJson() string {
-	s, err := json.Marshal(Conf.Sandbox_config)
+	s, err := json.Marshal(Conf.Sandbox_config) // Marsha将数据编码成json字符串
 	if err != nil {
 		panic(err)
 	}
