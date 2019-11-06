@@ -98,12 +98,12 @@ type SandboxEventFunc func(SandboxEventType, Sandbox)
 type SandboxEventType int
 
 const (
-	EvCreate    SandboxEventType = iota
-	EvDestroy                    = iota
-	EvPause                      = iota
-	EvUnpause                    = iota
-	EvFork                       = iota
-	EvChildExit                  = iota
+	EvCreate    SandboxEventType = iota // iota是golang语言的常量计数器,只能在常量的表达式中使用。EvCreate=0
+	EvDestroy                    = iota // const中每新增一行常量声明将使iota计数一次。EvDestroy=1
+	EvPause                      = iota // 从第二行开始 '= iota' 可以省略。EvPause=2
+	EvUnpause                    = iota // EvUnpause=3
+	EvFork                       = iota // EvFork=4
+	EvChildExit                  = iota // EvChildExit=5
 )
 
 type SandboxEvent struct {
