@@ -2,8 +2,8 @@ PWD = $(shell pwd)
 
 GO = go
 OL_DIR = $(abspath ./src)
-OL_GO_FILES = $(shell find src/ -name '*.go')
-LAMBDA_FILES = $(shell find lambda)
+OL_GO_FILES = $(shell find src/ -name '*.go') # src/main.go
+LAMBDA_FILES = $(shell find lambda) # src/lambda/
 
 .PHONY: all
 .PHONY: install

@@ -25,6 +25,7 @@ import (
 
 var client *docker.Client
 
+/* 从命令行参数 -p 中获取工作路径 */
 func getOlPath(ctx *cli.Context) (string, error) {
 	olPath := ctx.String("path") // 获取path这个标志所带的参数值
 	if olPath == "" {
