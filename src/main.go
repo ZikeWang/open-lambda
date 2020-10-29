@@ -354,7 +354,7 @@ func kill(ctx *cli.Context) error {
 
 	// locate worker.pid, use it to get worker's PID
 	configPath := filepath.Join(olPath, "config.json")
-	if err := common.LoadConf(configPath); err != nil 
+	if err := common.LoadConf(configPath); err != nil {
 		return err
 	}
 	data, err := ioutil.ReadFile(filepath.Join(common.Conf.Worker_dir, "worker.pid"))
