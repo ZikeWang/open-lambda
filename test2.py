@@ -37,6 +37,7 @@ def get_mem_stat_mb(stat):
                 return int(parts[1]) / 1024 # 将数值转化为以mb为单位的整型
     raise Exception('could not get stat')
 
+
 # 通过运行get_mem_stat_mb函数获取 “当前可用内存” 数据，超过函数中静态定义的限制后，执行系统调用
 def ol_oom_killer():
     while True:
@@ -44,6 +45,7 @@ def ol_oom_killer():
             print("out of memory, trying to kill OL")
             os.system('pkill ol') # os.system() 用于执行传入参数的指令，代替了手动在命令行输入
         time.sleep(1)
+
 
 def test(fn):
     def wrapper(*args, **kwargs):
@@ -79,7 +81,7 @@ def test(fn):
         mounts0 = mounts()
         try:
             # setup worker
-            run(['./ol', 'worker', '-p='+OLDIR, '--detach'])
+            run(['./ol', 'worker', '-p='+OLDIR, '--detach']) # --d 才能进入到 detach mode
 
             # run test/benchmark
             test_t0 = time.time()
@@ -119,13 +121,14 @@ def test(fn):
             result["worker_tail"] = f.read().split("\n")
             if result["pass"]:
                 # truncate because we probably won't use it for debugging
-                result["worker_tail"] = result["worker_tail"][-10:] # 从倒数第10个到最后，含头含尾；如果是[-10,-1]则包含最后一个
+                result["worker_tail"] = result["worker_tail"][:] # [-10:]从倒数第 10 个记录开始到最后打印到 worker_tail; [:]打印所有日志
 
         results["runs"].append(result)
         print(json.dumps(result, indent=2))
         return rv
 
     return wrapper
+
 
 # 该函数将传入的参数写进 OLDIR/config.json ，并将curr_conf设置为该参数
 def put_conf(conf):
@@ -134,6 +137,7 @@ def put_conf(conf):
         json.dump(conf, f, indent=2) # dump()与dumps()还是有点区别的，dump用于将dict类型的数据(第一个参数)转成str，并写入到json文件中(第二个参数)
     curr_conf = conf
 
+
 # 该函数用于把命令行mount命令执行后的结果存储到变量中
 def mounts():
     output = check_output(["mount"]) # subprocess.check_output函数会使用参数作为命令来运行，并返回命令执行后的输出结果。通过 mount 命令可以查看已挂载的文件系统，会输出丰富的信息
@@ -141,7 +145,7 @@ def mounts():
     output = output.split("\n") # split函数指定了以 "\n" 为分隔符对字符串进行切片，即将原字符串类似于 "xxx\nxxx\nxxx\n" 的形式转换为 {'xxx', 'xxx', 'xxx'}
     return set(output) # set() 函数创建一个无序不重复元素的集合
 
-        
+
 @contextmanager
 def TestConf(**keywords): # 关键词参数，是python中的可变参数，本质上是一个 dict，如 a=1
     with open(os.path.join(OLDIR, "config.json")) as f:
@@ -432,10 +436,24 @@ def recursive_kill(depth):
     assert destroys == depth
 
 
+@test
+def echo_test():
+    msg = 'hello world'
+    r = post("run/echo", msg)
+    raise_for_status(r)
+    if r.json() != msg:
+        raise Exception("found %s but expected %s" % (r.json(), msg))
+    '''
+    r = post("stats", None)
+    raise_for_status(r)
+    '''
+
+
 def tests():
     test_reg = os.path.abspath("test-registry")
 
     with TestConf(sandbox="docker", registry=test_reg, features={"import_cache": False}):
+        '''
         ping_test()
 
         # do smoke tests under various configs
@@ -448,6 +466,8 @@ def tests():
             stress_one_lambda(procs=1, seconds=15)
             stress_one_lambda(procs=2, seconds=15)
             stress_one_lambda(procs=8, seconds=15)
+        '''
+        echo_test()
 
 
 def main():

@@ -259,17 +259,19 @@ func worker(ctx *cli.Context) error {
 	detach := ctx.Bool("detach")
 
 	if detach {
+		fmt.Printf("Getting into detach mode\n")
+
 		// stdout+stderr both go to log
 		logPath := filepath.Join(olPath, "worker.out")
-		f, err := os.Create(logPath) // Create 采用模式0666（任何人都可读写，不可执行）创建一个名为 传入参数 logPath 的文件
+		f, err := os.Create(logPath) // Create 采用模式0666（任何人都可读写，不可执行）创建一个名为 logPath 的文件
 		if err != nil {
 			return err
 		}
-		attr := os.ProcAttr{ // 结构体类型ProcAttr保管将被StartProcess函数用于一个新进程的属性
-			Files: []*os.File{nil, f, f},
+		attr := os.ProcAttr{
+			Files: []*os.File{nil, f, f}, // 子进程属性中活动文件对象依次绑定为标准输入，标准输出，标准错误输出
 		}
 		cmd := []string{}
-		for _, arg := range os.Args {
+		for _, arg := range os.Args { // 提取 ./ol worker -p=test-dir --detach 命令行中除去 --detach 的命令
 			if arg != "-d" && arg != "--detach" {
 				cmd = append(cmd, arg)
 			}
@@ -278,7 +280,7 @@ func worker(ctx *cli.Context) error {
 		if err != nil {
 			return err
 		}
-		proc, err := os.StartProcess(binPath, cmd, &attr)
+		proc, err := os.StartProcess(binPath, cmd, &attr) // 启动一个新进程，由于没有 detach 因此新进程执行 else 内的代码
 		if err != nil {
 			return err
 		}
@@ -311,7 +313,7 @@ func worker(ctx *cli.Context) error {
 			}
 
 			// is it reachable?
-			url := fmt.Sprintf("http://localhost:%s/pid", common.Conf.Worker_port)
+			url := fmt.Sprintf("http://localhost:%s/pid", common.Conf.Worker_port) // 在执行真正用户 run 命令前会先执行 /pid
 			response, err := http.Get(url)
 			if err != nil {
 				ping_err = err
@@ -337,6 +339,8 @@ func worker(ctx *cli.Context) error {
 
 		return fmt.Errorf("worker still not reachable after 30 seconds :: %s", ping_err)
 	} else {
+		fmt.Printf("Not getting into detach mode\n")
+
 		if err := server.Main(); err != nil {
 			return err
 		}
