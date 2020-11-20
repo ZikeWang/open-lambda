@@ -116,7 +116,7 @@ type LimitsConfig struct {
 // if they are empty.
 func LoadDefaults(olPath string) error {
 	workerDir := filepath.Join(olPath, "worker")
-	registryDir := filepath.Join(olPath, "registry")
+	//registryDir := filepath.Join(olPath, "registry")
 	baseImgDir := filepath.Join(olPath, "lambda")
 	packagesDir := filepath.Join(baseImgDir, "packages")
 
@@ -133,8 +133,9 @@ func LoadDefaults(olPath string) error {
 		Worker_dir:        workerDir,
 		Server_mode:       "lambda",
 		Worker_port:       "5000",
-		Registry:          registryDir, // 如L31，对应的json文本为 "resgistry"
-		Sandbox:           "sock",
+		//Registry:          registryDir, // 如L31，对应的json文本为 "resgistry"
+		Registry:          "/home/vagrant/open-lambda/test-registry",
+		Sandbox:           "docker", // sock or docker
 		Pkgs_dir:          packagesDir,
 		Sandbox_config:    map[string]interface{}{},
 		SOCK_base_path:    baseImgDir,
@@ -148,7 +149,7 @@ func LoadDefaults(olPath string) error {
 			Swappiness:       0,
 		},
 		Features: FeaturesConfig{
-			Import_cache:        true,
+			Import_cache:        false, // sock default is true
 			Downsize_paused_mem: true,
 		},
 		Storage: StorageConfig{

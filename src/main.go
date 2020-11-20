@@ -40,6 +40,11 @@ func initOLDir(olPath string) (err error) {
 		return err
 	}
 
+	registryPath := filepath.Join(olPath, "registry")
+	if err := os.Mkdir(registryPath, 0700); err != nil {
+		return err
+	}
+
 	if err := common.LoadDefaults(olPath); err != nil {
 		return err
 	}
@@ -53,9 +58,11 @@ func initOLDir(olPath string) (err error) {
 		return err
 	}
 
+	/*
 	if err := os.Mkdir(common.Conf.Registry, 0700); err != nil {
 		return err
 	}
+	*/
 
 	// create a base directory to run sock handlers
 	base := common.Conf.SOCK_base_path
