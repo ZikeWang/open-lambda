@@ -148,6 +148,7 @@ func (mgr *LambdaMgr) Get(name string) (f *LambdaFunc) {
 	f = mgr.lfuncMap[name]
 
 	if f == nil {
+		log.Printf("[lambda.go 151] lfuncMap[%s] is nil, new LambdaFunc", name)
 		f = &LambdaFunc{
 			lmgr:      mgr,
 			name:      name,
@@ -205,6 +206,7 @@ func (mgr *LambdaMgr) Cleanup() {
 }
 
 func (f *LambdaFunc) Invoke(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[lambda.go 209] execute Invoke()")
 	t := common.T0("LambdaFunc.Invoke")
 	defer t.T1()
 
@@ -405,13 +407,17 @@ func (f *LambdaFunc) Task() {
 
 	// stats for autoscaling
 	outstandingReqs := 0
-	execMs := common.NewRollingAvg(10)
+	execMs := common.NewRollingAvg(10) // RollingAvg.size = 10
 	var lastScaling *time.Time = nil
-	timeout := time.NewTimer(0)
+	timeout := time.NewTimer(0) // 最少 0 (ns) 后向 timeout->C 发送当前的时间
 
+	loopcnt := 0
 	for {
+		loopcnt += 1
+		log.Printf("[lambda.go 416] LambdaFunc.Task() for loops the %d times\n", loopcnt)
 		select {
 		case <-timeout.C:
+			log.Printf("[lambda.go 420] LambdaFunc received timeout signal\n")
 			if f.codeDir == "" {
 				continue
 			}
@@ -457,6 +463,7 @@ func (f *LambdaFunc) Task() {
 				req.done <- true
 			}
 		case req := <-f.doneChan:
+			log.Printf("[lambda.go 462] LambdaFunc received doneChan signal\n")
 			// msg: instance -> function
 
 			execMs.Add(req.execMs)
@@ -466,6 +473,7 @@ func (f *LambdaFunc) Task() {
 			req.done <- true
 
 		case done := <-f.killChan:
+			log.Printf("[lambda.go 472] LambdaFunc received killChan signal\n")
 			// signal all instances to die, then wait for
 			// cleanup task to finish and exit
 			el := f.instances.Front()
@@ -482,6 +490,8 @@ func (f *LambdaFunc) Task() {
 			done <- true
 			return
 		}
+
+		log.Printf("[lambda.go 493] LambdaFunc.Task() executing after select\n")
 
 		// POLICY: how many instances (i.e., virtual sandboxes) should we allocate?
 
@@ -506,12 +516,15 @@ func (f *LambdaFunc) Task() {
 		// AUTOSCALING STEP 2: tweak how many instances we have, to get closer to our goal
 
 		// make at most one scaling adjustment per second
-		adjustFreq := time.Second
+		adjustFreq := time.Second // 1s
+		//adjustFreq := time.Millisecond // 1ms
 		now := time.Now()
 		if lastScaling != nil {
 			elapsed := now.Sub(*lastScaling)
 			if elapsed < adjustFreq {
+				log.Printf("[lambda.go 516] elapsed time < 1s\n")
 				if desiredInstances != f.instances.Len() {
+					log.Printf("[lambda.go 526] LambdaFunc adjust new timeout interval\n")
 					timeout = time.NewTimer(adjustFreq - elapsed)
 				}
 				continue
@@ -525,6 +538,7 @@ func (f *LambdaFunc) Task() {
 			f.newInstance()
 			lastScaling = &now
 		} else if f.instances.Len() > desiredInstances {
+			log.Printf("[lambda.go 531] execute LambdaInstance AsyncKill\n")
 			f.printf("reduce instances to %d", f.instances.Len()-1)
 			waitChan := f.instances.Back().Value.(*LambdaInstance).AsyncKill()
 			f.instances.Remove(f.instances.Back())
@@ -533,6 +547,7 @@ func (f *LambdaFunc) Task() {
 		}
 
 		if f.instances.Len() != desiredInstances {
+			log.Printf("[lambda.go 540] current instances numbers != desired numbers\n")
 			// we can only adjust quickly, so we want to
 			// run through this loop again as soon as
 			// possible, even if there are no requests to
@@ -589,6 +604,7 @@ func (linst *LambdaInstance) Task() {
 		select {
 		case req = <-f.instChan:
 		case killed := <-linst.killChan:
+			log.Printf("[lambda.go 596] LambdaInstance killChan actived and destroy sb\n")
 			if sb != nil {
 				sb.Destroy()
 			}
@@ -626,6 +642,7 @@ func (linst *LambdaInstance) Task() {
 
 			// import cache is either disabled or it failed
 			if sb == nil {
+				log.Printf("[lambda.go 630] import cache is disabled, create docker sandbox pool\n")
 				scratchDir := f.lmgr.scratchDirs.Make(f.name)
 				sb, err = f.lmgr.sbPool.Create(nil, true, linst.codeDir, scratchDir, linst.meta)
 			}
@@ -652,6 +669,7 @@ func (linst *LambdaInstance) Task() {
 
 		// serve until we incoming queue is empty
 		for req != nil {
+			log.Printf("[lambda.go 656] begin to serve HTTP request\n")
 			// ask Sandbox to respond, via HTTP proxy
 			t := common.T0("ServeHTTP")
 			proxy.ServeHTTP(req.w, req.r)
@@ -662,6 +680,7 @@ func (linst *LambdaInstance) Task() {
 			// check whether we should shutdown (non-blocking)
 			select {
 			case killed := <-linst.killChan:
+				log.Printf("[lambda.go 673] execute sb destroy in LambdaInstance.Task()\n")
 				sb.Destroy()
 				killed <- true
 				return

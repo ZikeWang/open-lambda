@@ -92,8 +92,10 @@ func Main() (err error) {
 	switch common.Conf.Server_mode {
 	case "lambda":
 		s, err = NewLambdaServer()
+		//_, err = NewLambdaServer()
 	case "sock":
 		s, err = NewSOCKServer()
+		//_, err = NewSOCKServer()
 	default:
 		return fmt.Errorf("unknown Server_mode %s", common.Conf.Server_mode)
 	}
@@ -107,8 +109,17 @@ func Main() (err error) {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	signal.Notify(c, os.Interrupt, syscall.SIGINT)
 	go func() {
-		<-c
-		log.Printf("received kill signal, cleaning up")
+		//<-c
+		//log.Printf("received kill signal, cleaning up")
+		sigRecv := <-c
+		switch sigRecv {
+		case syscall.SIGTERM:
+			log.Printf("[server.go 117] received SIGTERM signal\n")
+		case syscall.SIGINT:
+			log.Printf("[server.go 119] received SIGINT signal\n")
+		default:
+			log.Println("[server.go 115] received kill signal : ", sigRecv)
+		}
 		s.cleanup()
 
 		statsPath := filepath.Join(common.Conf.Worker_dir, "stats.json")
