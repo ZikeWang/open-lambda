@@ -96,11 +96,13 @@ func NewLambdaMgr() (res *LambdaMgr, err error) {
 		}
 	}()
 
-	mgr.codeDirs, err = common.NewDirMaker("code", common.Conf.Storage.Code.Mode())
+	// 在 open-lambda/test-dir/worker 下新建目录 code 并将路径赋值给 LambdaMgr.codeDirs
+	mgr.codeDirs, err = common.NewDirMaker("code", common.Conf.Storage.Code.Mode()) // Mode: STORE_REGULAR
 	if err != nil {
 		return nil, err
 	}
-	mgr.scratchDirs, err = common.NewDirMaker("scratch", common.Conf.Storage.Scratch.Mode())
+	// 在 open-lambda/test-dir/worker 下新建目录 scratch 并将路径赋值给 LambdaMgr.scratchDirs
+	mgr.scratchDirs, err = common.NewDirMaker("scratch", common.Conf.Storage.Scratch.Mode()) // Mode: STORE_REGULAR
 	if err != nil {
 		return nil, err
 	}
@@ -264,9 +266,9 @@ func parseMeta(codeDir string) (meta *sandbox.SandboxMeta, err error) {
 	defer file.Close()
 
 	scnr := bufio.NewScanner(file)
-	for scnr.Scan() {
-		line := strings.ReplaceAll(scnr.Text(), " ", "")
-		parts := strings.Split(line, ":")
+	for scnr.Scan() { // Scan() 默认逐行读取，利用 for 进行循环遍历文件
+		line := strings.ReplaceAll(scnr.Text(), " ", "") // Text() 将 Scanner 读取的内容生成为 string，然后将所有的 " " 替换为 "" 并返回新的副本
+		parts := strings.Split(line, ":") // 以 ":" 为分隔符切割返回 []string 类型
 		if parts[0] == "#ol-install" {
 			for _, val := range strings.Split(parts[1], ",") {
 				val = strings.TrimSpace(val)
@@ -299,19 +301,26 @@ func parseMeta(codeDir string) (meta *sandbox.SandboxMeta, err error) {
 // 2. we won't update pull time (so well check for a fix next tim)
 func (f *LambdaFunc) pullHandlerIfStale() (err error) {
 	// check if there is newer code, download it if necessary
-	now := time.Now()
-	cache_ns := int64(common.Conf.Registry_cache_ms) * 1000000
+	now := time.Now() // type Time 是以 ns 为精度计量时间，Now() 返回当前时间 
+	cache_ns := int64(common.Conf.Registry_cache_ms) * 1000000 // Conf 中默认参数为 5s
 
 	// should we check for new code?
+	// 这里是设置了一个 interval = 5s 的间隔，如果这一次操作距离上一次 pull 的时间间隔 < interval
+	// 则默认不执行本次操作，因此这里这个 interval 设置的时间需要斟酌，另外如作者注释所言：是否需要执行这样的检测
 	if f.lastPull != nil && int64(now.Sub(*f.lastPull)) < cache_ns {
 		return nil
 	}
 
+	log.Printf("[lambda.go 314] currently the LambdaFunc.codeDir is '%s'\n", f.codeDir)
+
 	// is there new code?
+	// 建立目录 open-lambda/test-dir/worker/code/1001-echo
+	// 将 open-lambda/test-registry/echo 下的文件 f.py 拷贝到上述目录中
 	codeDir, err := f.lmgr.HandlerPuller.Pull(f.name)
 	if err != nil {
 		return err
 	}
+	log.Printf("[lambda.go 321] handler pulled into %s\n", codeDir)
 
 	if codeDir == f.codeDir {
 		return nil

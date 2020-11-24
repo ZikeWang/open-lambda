@@ -65,8 +65,8 @@ func (dm *DirMaker) Get(suffix string) string {
 	if suffix != "" {
 		suffix = "-" + suffix
 	}
-	id := fmt.Sprintf("%d", atomic.AddInt64(&nextDirId, 1))
-	return filepath.Join(dm.prefix, id) + suffix
+	id := fmt.Sprintf("%d", atomic.AddInt64(&nextDirId, 1)) // 初始为 1000，每次执行 Get 累加 1
+	return filepath.Join(dm.prefix, id) + suffix // prefix/100x-suffix
 }
 
 func (dm *DirMaker) Make(suffix string) string {

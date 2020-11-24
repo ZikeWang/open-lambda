@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"log"
 
 	"github.com/open-lambda/open-lambda/ol/common"
 )
@@ -75,15 +76,16 @@ func (cp *HandlerPuller) Pull(name string) (targetDir string, err error) {
 		return "", fmt.Errorf("lambda not found at any of these locations: %s", strings.Join(urls, ", "))
 	} else {
 		// registry type = file
-		paths := []string{
-			filepath.Join(cp.prefix, name) + ".tar.gz",
-			filepath.Join(cp.prefix, name) + ".py",
-			filepath.Join(cp.prefix, name),
+		paths := []string{ // prefix 为 common.Conf.Resgistry 即 open-lambda/test-registry
+			filepath.Join(cp.prefix, name) + ".tar.gz", // tar file: xxx.tar.gz
+			filepath.Join(cp.prefix, name) + ".py", // regular file: xxx.py
+			filepath.Join(cp.prefix, name), // dir: xxx
 		}
 
 		for i := 0; i < len(paths); i++ {
-			if _, err := os.Stat(paths[i]); !os.IsNotExist(err) {
-				targetDir, err = cp.pullLocalFile(paths[i], name)
+			if _, err := os.Stat(paths[i]); !os.IsNotExist(err) { // paths[i] 对应路径的文件存在则执行 if 分支
+				log.Printf("[handlerPuller.go 86] paths[%d] '%s' exists and ready to pull from there\n", i, paths[i])
+				targetDir, err = cp.pullLocalFile(paths[i], name) // 传入完整路径和文件名
 				return targetDir, err
 			}
 		}
@@ -98,7 +100,8 @@ func (cp *HandlerPuller) Reset(name string) {
 }
 
 func (cp *HandlerPuller) pullLocalFile(src, lambdaName string) (targetDir string, err error) {
-	stat, err := os.Stat(src)
+	log.Printf("[handlerPuller.go 102] pullLocalFile sre path is '%s'\n", src)
+	stat, err := os.Stat(src) // Stat returns type FileInfo
 	if err != nil {
 		return "", err
 	}
@@ -106,13 +109,13 @@ func (cp *HandlerPuller) pullLocalFile(src, lambdaName string) (targetDir string
 	if stat.Mode().IsDir() {
 		// this is really just a debug mode, and is not
 		// expected to be efficient
-		targetDir = cp.dirMaker.Get(lambdaName)
+		targetDir = cp.dirMaker.Get(lambdaName) // open-lambda/test-dir/worker/code/1001-echo
 
-		cmd := exec.Command("cp", "-r", src, targetDir)
+		cmd := exec.Command("cp", "-r", src, targetDir) // -r：若给出的源文件是一个目录文件，复制该目录下所有的子目录和文件到目的目录下
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("%s :: %s", err, string(output))
 		}
-		return targetDir, nil
+		return targetDir, nil // 对于 open-lambda 原始的实现(test-registry/echo/f.py) 在这里返回
 	} else if !stat.Mode().IsRegular() {
 		return "", fmt.Errorf("%s not a file or directory", src)
 	}
@@ -120,7 +123,7 @@ func (cp *HandlerPuller) pullLocalFile(src, lambdaName string) (targetDir string
 	// for regular files, we cache based on mod time.  We don't
 	// cache at the file level if this is a remote store (because
 	// caching is handled at the web level)
-	version := stat.ModTime().String()
+	version := stat.ModTime().String() // Modification Time
 	if !cp.isRemote() {
 		cacheEntry := cp.getCache(lambdaName)
 		if cacheEntry != nil && cacheEntry.version == version {
@@ -130,12 +133,12 @@ func (cp *HandlerPuller) pullLocalFile(src, lambdaName string) (targetDir string
 	}
 
 	// miss:
-	targetDir = cp.dirMaker.Get(lambdaName)
-	if err := os.Mkdir(targetDir, os.ModeDir); err != nil {
+	targetDir = cp.dirMaker.Get(lambdaName) // HandlerPuller.dirMaker 实际为 LambdaMgr.codeDirs, open-lambda/test-dir/worker/code/1001-echo
+	if err := os.Mkdir(targetDir, os.ModeDir); err != nil { // 根据 targetDir 路径创建目录：open-lambda/test-dir/worker/code/1001-echo
 		return "", err
 	}
 
-	if strings.HasSuffix(src, ".py") {
+	if strings.HasSuffix(src, ".py") { // open-lambda/test-registry/echo
 		cmd := exec.Command("cp", src, filepath.Join(targetDir, "f.py"))
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("%s :: %s", err, string(output))
@@ -217,7 +220,7 @@ func (cp *HandlerPuller) pullRemoteFile(src, lambdaName string) (targetDir strin
 }
 
 func (cp *HandlerPuller) getCache(name string) *CacheEntry {
-	entry, found := cp.dirCache.Load(name)
+	entry, found := cp.dirCache.Load(name) // load 返回 sync.map 中 key(name) 对应的 value(&CacheEntry{version, path})，如果没有则返回 nil
 	if !found {
 		return nil
 	}

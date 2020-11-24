@@ -448,6 +448,13 @@ def echo_test():
     raise_for_status(r)
     '''
 
+@test
+def hello_test():
+    msg = 'hello'
+    r = post("run/hello")
+    raise_for_status(r)
+    if r.json() != msg:
+        raise Exception("found %s but expected %s" % (r.json(), msg))
 
 def tests():
     test_reg = os.path.abspath("test-registry")
@@ -467,7 +474,7 @@ def tests():
             stress_one_lambda(procs=2, seconds=15)
             stress_one_lambda(procs=8, seconds=15)
         '''
-        echo_test()
+        hello_test()
 
 
 def main():
