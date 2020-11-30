@@ -128,7 +128,7 @@ type PackageMeta struct {
 	Deps     []string `json:"Deps"`
 	TopLevel []string `json:"TopLevel"`
 }
-
+// 创建 open-lambda/test-dir/worker/admin-lambda/pip-install/f.py 并写入上面 installLambda 的内容
 func NewPackagePuller(sbPool sandbox.SandboxPool, depTracer *DepTracer) (*PackagePuller, error) {
 	// create a lambda function for installing pip packages.  We do
 	// each install in a Sandbox for two reasons:
@@ -136,11 +136,11 @@ func NewPackagePuller(sbPool sandbox.SandboxPool, depTracer *DepTracer) (*Packag
 	// 1. packages may be malicious
 	// 2. we want to install the right version, matching the Python
 	//    in the Sandbox
-	pipLambda := filepath.Join(common.Conf.Worker_dir, "admin-lambdas", "pip-install")
+	pipLambda := filepath.Join(common.Conf.Worker_dir, "admin-lambdas", "pip-install") // 创建目录 open-lambda/test-dir/worker/admin-lambdas/pip-install
 	if err := os.MkdirAll(pipLambda, 0700); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(pipLambda, "f.py")
+	path := filepath.Join(pipLambda, "f.py") // 创建文件 open-lambda/test-dir/worker/admin-lambdas/pip-install/f.py
 	code := []byte(installLambda)
 	if err := ioutil.WriteFile(path, code, 0600); err != nil {
 		return nil, err
@@ -158,6 +158,7 @@ func NewPackagePuller(sbPool sandbox.SandboxPool, depTracer *DepTracer) (*Packag
 // From PEP-426: "All comparisons of distribution names MUST
 // be case insensitive, and MUST consider hyphens and
 // underscores to be equivalent."
+// 字符串小写化，并将 '_' 替换为 '-'
 func normalizePkg(pkg string) string {
 	return strings.ReplaceAll(strings.ToLower(pkg), "_", "-")
 }
@@ -166,11 +167,18 @@ func normalizePkg(pkg string) string {
 func (pp *PackagePuller) InstallRecursive(installs []string) ([]string, error) {
 	// shrink capacity to length so that our appends are not
 	// visible to caller
-	installs = installs[:len(installs):len(installs)]
+	/*
+	s = s[low : high : max] 切片的三个参数的切片截取的意义为:
+	low 为截取的起始下标(包含)，high 为截取的结束下标(不含)，max 为切片保留的原切片的最大下标(不含)
+	即新切片从老切片的 low 下标元素开始，len = high - low, cap = max - low
+	high 和 max 一旦超出在老切片中越界，就会发生 runtime err，slice out of range
+	如果省略第三个参数的时候，第三个参数默认和第二个参数相同，即 len = cap
+	*/
+	installs = installs[:len(installs):len(installs)] // 限定了新切片最大的容量为原大小
 
 	installSet := make(map[string]bool)
 	for _, install := range installs {
-		name := strings.Split(install, "==")[0]
+		name := strings.Split(install, "==")[0] // name 取第一个 == 前的字符串
 		installSet[name] = true
 	}
 
@@ -185,11 +193,15 @@ func (pp *PackagePuller) InstallRecursive(installs []string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-
+		/*
 		if common.Conf.Trace.Package {
 			log.Printf("Package '%s' has deps %v", pkg, p.meta.Deps)
 			log.Printf("Package '%s' has top-level modules %v", pkg, p.meta.TopLevel)
 		}
+		*/
+
+		log.Printf("[packagePuller.go 203] Package '%s' has Deps %v", pkg, p.meta.Deps)
+		log.Printf("[packagePuller.go 204] Package '%s' has TopLevel modules %v", pkg, p.meta.TopLevel)
 
 		// push any previously unseen deps on the list of ones to install
 		for _, dep := range p.meta.Deps {
@@ -246,7 +258,7 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	// the pip-install lambda installs to /host, which is the the
 	// same as scratchDir, which is the same as a sub-directory
 	// named after the package in the packages dir
-	scratchDir := filepath.Join(common.Conf.Pkgs_dir, p.name)
+	scratchDir := filepath.Join(common.Conf.Pkgs_dir, p.name) // open-lambda/test-dir/lambda/package/<package_name>
 	log.Printf("do pip install, using scratchDir='%v'", scratchDir)
 
 	alreadyInstalled := false
@@ -270,6 +282,8 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	meta := &sandbox.SandboxMeta{
 		MemLimitMB: common.Conf.Limits.Installer_mem_mb,
 	}
+	// pipLambda路径： open-lambda/test-dir/worker/admin-lambdas/pip-install
+	// scratchDir路径：open-lambda/test-dir/lambda/packages/<package_name>
 	sb, err := pp.sbPool.Create(nil, true, pp.pipLambda, scratchDir, meta)
 	if err != nil {
 		return err
@@ -313,6 +327,8 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	if err := json.Unmarshal(body, &p.meta); err != nil {
 		return err
 	}
+
+	log.Printf("[packagePuller.go 327] pipLambda install result [Deps] [TopLevel]: '%s'", p.meta)
 
 	for i, pkg := range p.meta.Deps {
 		p.meta.Deps[i] = normalizePkg(pkg)

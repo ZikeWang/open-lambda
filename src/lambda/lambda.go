@@ -270,8 +270,8 @@ func parseMeta(codeDir string) (meta *sandbox.SandboxMeta, err error) {
 		line := strings.ReplaceAll(scnr.Text(), " ", "") // Text() 将 Scanner 读取的内容生成为 string，然后将所有的 " " 替换为 "" 并返回新的副本
 		parts := strings.Split(line, ":") // 以 ":" 为分隔符切割返回 []string 类型
 		if parts[0] == "#ol-install" {
-			for _, val := range strings.Split(parts[1], ",") {
-				val = strings.TrimSpace(val)
+			for _, val := range strings.Split(parts[1], ",") { // for-range键值循环中 key 为切片下标 val 为下标对应的值，这里只需取切片中的值
+				val = strings.TrimSpace(val) // 去掉字符串开头结尾的空格
 				if len(val) > 0 {
 					installs = append(installs, val)
 				}

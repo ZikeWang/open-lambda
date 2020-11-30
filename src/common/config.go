@@ -118,7 +118,7 @@ func LoadDefaults(olPath string) error {
 	workerDir := filepath.Join(olPath, "worker")
 	//registryDir := filepath.Join(olPath, "registry")
 	baseImgDir := filepath.Join(olPath, "lambda")
-	packagesDir := filepath.Join(baseImgDir, "packages")
+	packagesDir := filepath.Join(baseImgDir, "packages") // open-lambda/test-dir/lambda/packages
 
 	// split anything above 512 MB evenly between handler and import cache
 	in := &syscall.Sysinfo_t{} // Sysinfo_t 是 “syscall” 库中的一个结构体类型，每一个域都保存了相关的系统信息

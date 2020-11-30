@@ -456,6 +456,14 @@ def hello_test():
     if r.json() != msg:
         raise Exception("found %s but expected %s" % (r.json(), msg))
 
+@test
+def install_test():
+    msg = 'imported'
+    r = post("run/install")
+    raise_for_status(r)
+    if r.json() != msg:
+        raise Exception("found %s but expected %s" % (r.json(), msg))
+
 def tests():
     test_reg = os.path.abspath("test-registry")
 
@@ -474,7 +482,7 @@ def tests():
             stress_one_lambda(procs=2, seconds=15)
             stress_one_lambda(procs=8, seconds=15)
         '''
-        hello_test()
+        install_test()
 
 
 def main():
