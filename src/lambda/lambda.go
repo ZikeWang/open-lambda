@@ -423,10 +423,10 @@ func (f *LambdaFunc) Task() {
 	loopcnt := 0
 	for {
 		loopcnt += 1
-		log.Printf("[lambda.go 416] LambdaFunc.Task() for loops the %d times\n", loopcnt)
+		log.Printf("[lambda.go 426] LambdaFunc.Task() for loops the %d times\n", loopcnt)
 		select {
 		case <-timeout.C:
-			log.Printf("[lambda.go 420] LambdaFunc received timeout signal\n")
+			log.Printf("[lambda.go 429] LambdaFunc received timeout signal\n")
 			if f.codeDir == "" {
 				continue
 			}
@@ -436,13 +436,17 @@ func (f *LambdaFunc) Task() {
 			// check for new code, and cleanup old code
 			// (and instances that use it) if necessary
 			oldCodeDir := f.codeDir
+
+			tHP := common.T0("HP") // Handler and Package pull 计时起点
 			if err := f.pullHandlerIfStale(); err != nil {
-				f.printf("[lambda.go 440] Error checking for new lambda code: %v", err)
+				f.printf("[lambda.go 442] Error checking for new lambda code: %v", err)
 				req.w.WriteHeader(http.StatusInternalServerError)
 				req.w.Write([]byte(err.Error() + "\n"))
 				req.done <- true
 				continue
 			}
+			tHP.T1() // Handler and Package pull 计时终点
+			log.Printf("[lambda.go 449] pull Handler and install Package consume %d milliseconds\n", tHP.Milliseconds)
 
 			if oldCodeDir != "" && oldCodeDir != f.codeDir {
 				el := f.instances.Front()
@@ -500,7 +504,7 @@ func (f *LambdaFunc) Task() {
 			return
 		}
 
-		log.Printf("[lambda.go 493] LambdaFunc.Task() executing after select\n")
+		log.Printf("[lambda.go 507] LambdaFunc.Task() executing after select\n")
 
 		// POLICY: how many instances (i.e., virtual sandboxes) should we allocate?
 
@@ -531,9 +535,9 @@ func (f *LambdaFunc) Task() {
 		if lastScaling != nil {
 			elapsed := now.Sub(*lastScaling)
 			if elapsed < adjustFreq {
-				log.Printf("[lambda.go 516] elapsed time < 1s\n")
+				log.Printf("[lambda.go 538] elapsed time < 1s\n")
 				if desiredInstances != f.instances.Len() {
-					log.Printf("[lambda.go 526] LambdaFunc adjust new timeout interval\n")
+					log.Printf("[lambda.go 540] LambdaFunc adjust new timeout interval\n")
 					timeout = time.NewTimer(adjustFreq - elapsed)
 				}
 				continue
@@ -547,7 +551,7 @@ func (f *LambdaFunc) Task() {
 			f.newInstance()
 			lastScaling = &now
 		} else if f.instances.Len() > desiredInstances {
-			log.Printf("[lambda.go 531] execute LambdaInstance AsyncKill\n")
+			log.Printf("[lambda.go 554] execute LambdaInstance AsyncKill\n")
 			f.printf("reduce instances to %d", f.instances.Len()-1)
 			waitChan := f.instances.Back().Value.(*LambdaInstance).AsyncKill()
 			f.instances.Remove(f.instances.Back())
@@ -556,7 +560,7 @@ func (f *LambdaFunc) Task() {
 		}
 
 		if f.instances.Len() != desiredInstances {
-			log.Printf("[lambda.go 540] current instances numbers != desired numbers\n")
+			log.Printf("[lambda.go 563] current instances numbers != desired numbers\n")
 			// we can only adjust quickly, so we want to
 			// run through this loop again as soon as
 			// possible, even if there are no requests to
@@ -613,7 +617,7 @@ func (linst *LambdaInstance) Task() {
 		select {
 		case req = <-f.instChan:
 		case killed := <-linst.killChan:
-			log.Printf("[lambda.go 596] LambdaInstance killChan actived and destroy sb\n")
+			log.Printf("[lambda.go 620] LambdaInstance killChan actived and destroy sb\n")
 			if sb != nil {
 				sb.Destroy()
 			}
@@ -628,13 +632,15 @@ func (linst *LambdaInstance) Task() {
 			// sandboxes rather than inactive sandboxes.
 			// Thus, if this fails, we'll try to handle it
 			// by just creating a new sandbox.
+			log.Printf("[lambda.go 636] ready to unpause an existed paused sandbox\n")
+			tUNPAUSE := common.T0("sbUnpause") // Unpause an existed paused sandbox 计时起点
 			if err := sb.Unpause(); err != nil {
 				f.printf("discard sandbox %s due to Unpause error: %v", sb.ID(), err)
 				sb = nil
 			}
+			tUNPAUSE.T1() // Unpause an existed paused sandbox 计时终点
+			log.Printf("[lambda.go 665] sandbox launch through unpause consume %d milliseconds\n", tUNPAUSE.Milliseconds)
 		}
-
-		t0 := common.T0("Scratch")
 
 		// if we don't already have a Sandbox, create one, and
 		// HTTP proxy over the channel
@@ -653,9 +659,12 @@ func (linst *LambdaInstance) Task() {
 
 			// import cache is either disabled or it failed
 			if sb == nil {
-				log.Printf("[lambda.go 630] import cache is disabled, create docker sandbox pool\n")
 				scratchDir := f.lmgr.scratchDirs.Make(f.name)
+				log.Printf("[lambda.go 658] ready to create a new sandbox while import cache is disabled\n")
+				tCREATE := common.T0("sbCreate") // Create a new sandbox 计时起点
 				sb, err = f.lmgr.sbPool.Create(nil, true, linst.codeDir, scratchDir, linst.meta)
+				tCREATE.T1() // Create a new sandbox 计时终点
+				log.Printf("[lambda.go 665] sandbox launch through create consume %d milliseconds\n", tCREATE.Milliseconds)
 			}
 
 			if err != nil {
@@ -680,19 +689,19 @@ func (linst *LambdaInstance) Task() {
 
 		// serve until we incoming queue is empty
 		for req != nil {
-			log.Printf("[lambda.go 656] begin to serve HTTP request\n")
+			log.Printf("[lambda.go 685] begin to serve HTTP request\n")
 			// ask Sandbox to respond, via HTTP proxy
-			t := common.T0("ServeHTTP")
+			tHTTP := common.T0("ServeHTTP")
 			proxy.ServeHTTP(req.w, req.r)
-			t.T1()
-			log.Printf("[lambda.go 686] ServeHTTP consume %d milliseconds", t.Milliseconds)
-			req.execMs = int(t.Milliseconds)
+			tHTTP.T1()
+			log.Printf("[lambda.go 690] ServeHTTP consume %d milliseconds\n", tHTTP.Milliseconds)
+			req.execMs = int(tHTTP.Milliseconds)
 			f.doneChan <- req
 
 			// check whether we should shutdown (non-blocking)
 			select {
 			case killed := <-linst.killChan:
-				log.Printf("[lambda.go 673] execute sb destroy in LambdaInstance.Task()\n")
+				log.Printf("[lambda.go 697] execute sb destroy in LambdaInstance.Task()\n")
 				sb.Destroy()
 				killed <- true
 				return
@@ -707,13 +716,11 @@ func (linst *LambdaInstance) Task() {
 			}
 		}
 
-		t0.T1()
-		log.Printf("[lambda.go 711] Scratch consume %d milliseconds", t0.Milliseconds)
-
 		if err := sb.Pause(); err != nil {
 			f.printf("discard sandbox %s due to Pause error: %v", sb.ID(), err)
 			sb = nil
 		}
+		log.Printf("[lambda.go 720] sandbox is paused\n")
 	}
 }
 
