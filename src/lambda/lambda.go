@@ -437,7 +437,7 @@ func (f *LambdaFunc) Task() {
 			// (and instances that use it) if necessary
 			oldCodeDir := f.codeDir
 			if err := f.pullHandlerIfStale(); err != nil {
-				f.printf("Error checking for new lambda code: %v", err)
+				f.printf("[lambda.go 440] Error checking for new lambda code: %v", err)
 				req.w.WriteHeader(http.StatusInternalServerError)
 				req.w.Write([]byte(err.Error() + "\n"))
 				req.done <- true
@@ -634,6 +634,8 @@ func (linst *LambdaInstance) Task() {
 			}
 		}
 
+		t0 := common.T0("Scratch")
+
 		// if we don't already have a Sandbox, create one, and
 		// HTTP proxy over the channel
 		if sb == nil {
@@ -683,6 +685,7 @@ func (linst *LambdaInstance) Task() {
 			t := common.T0("ServeHTTP")
 			proxy.ServeHTTP(req.w, req.r)
 			t.T1()
+			log.Printf("[lambda.go 686] ServeHTTP consume %d milliseconds", t.Milliseconds)
 			req.execMs = int(t.Milliseconds)
 			f.doneChan <- req
 
@@ -703,6 +706,9 @@ func (linst *LambdaInstance) Task() {
 				req = nil
 			}
 		}
+
+		t0.T1()
+		log.Printf("[lambda.go 711] Scratch consume %d milliseconds", t0.Milliseconds)
 
 		if err := sb.Pause(); err != nil {
 			f.printf("discard sandbox %s due to Pause error: %v", sb.ID(), err)

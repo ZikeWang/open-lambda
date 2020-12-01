@@ -266,6 +266,7 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 		// assume dir exististence means it is installed already
 		log.Printf("%s appears already installed from previous run of OL", p.name)
 		alreadyInstalled = true
+		return nil // 如果 Pkg 的目录存在，那么其至少安装过一次(包括该 Pkg 依赖的其他 Pkgs)，直接返回，跳过创建容器的冗余逻辑
 	} else {
 		log.Printf("run pip install %s from a new Sandbox to %s on host", p.name, scratchDir)
 		if err := os.Mkdir(scratchDir, 0700); err != nil {
@@ -286,6 +287,7 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	// scratchDir路径：open-lambda/test-dir/lambda/packages/<package_name>
 	sb, err := pp.sbPool.Create(nil, true, pp.pipLambda, scratchDir, meta)
 	if err != nil {
+		log.Printf("[packagePuller.go 289] Failed to create sandbox using sbPool.Create\n")
 		return err
 	}
 	defer sb.Destroy()
@@ -328,7 +330,7 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 		return err
 	}
 
-	log.Printf("[packagePuller.go 327] pipLambda install result [Deps] [TopLevel]: '%s'", p.meta)
+	log.Printf("[packagePuller.go 332] pipLambda install result [Deps] [TopLevel]: '%s'", p.meta)
 
 	for i, pkg := range p.meta.Deps {
 		p.meta.Deps[i] = normalizePkg(pkg)

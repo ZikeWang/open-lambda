@@ -107,8 +107,8 @@ func T0(name string) *Latency {
 }
 
 // measure latency to end time, and record it
-func (l *Latency) T1() {
-	l.Milliseconds = int64(time.Now().Sub(l.t0)) / 1000000
+func (l *Latency) T1() { // 传入的 l 作为基准，其时间为 l.to
+	l.Milliseconds = int64(time.Now().Sub(l.t0)) / 1000000 // 时间间隔 l.Millisecond = 当前时间 - l.t0，Time 单位为 nm，需要转换为 ms
 	if l.Milliseconds < 0 {
 		panic("negative latency")
 	}
