@@ -308,10 +308,11 @@ func (f *LambdaFunc) pullHandlerIfStale() (err error) {
 	// 这里是设置了一个 interval = 5s 的间隔，如果这一次操作距离上一次 pull 的时间间隔 < interval
 	// 则默认不执行本次操作，因此这里这个 interval 设置的时间需要斟酌，另外如作者注释所言：是否需要执行这样的检测
 	if f.lastPull != nil && int64(now.Sub(*f.lastPull)) < cache_ns {
+		log.Printf("[lambda.go 311] the time since the last handler/package PULL is less than cache_ns, skip pullHandleIfStale\n")
 		return nil
 	}
 
-	log.Printf("[lambda.go 314] currently the LambdaFunc.codeDir is '%s'\n", f.codeDir)
+	log.Printf("[lambda.go 314] run pullHandlerIfStale, currently the LambdaFunc.codeDir is '%s'\n", f.codeDir)
 
 	// is there new code?
 	// 建立目录 open-lambda/test-dir/worker/code/1001-echo
@@ -451,6 +452,7 @@ func (f *LambdaFunc) Task() {
 			if oldCodeDir != "" && oldCodeDir != f.codeDir {
 				el := f.instances.Front()
 				for el != nil {
+					log.Printf("[lambda.go 455] oldCodeDir<%s> != f.codeDir<%s>, triger LambdaInstance.AsyncKill\n", oldCodeDir, f.codeDir)
 					waitChan := el.Value.(*LambdaInstance).AsyncKill()
 					cleanupChan <- waitChan
 					el = el.Next()
@@ -673,7 +675,7 @@ func (linst *LambdaInstance) Task() {
 				f.doneChan <- req
 				continue // wait for another request before retrying
 			}
-
+			/*
 			proxy, err = sb.HttpProxy()
 			if err != nil {
 				req.w.WriteHeader(http.StatusInternalServerError)
@@ -683,6 +685,17 @@ func (linst *LambdaInstance) Task() {
 				sb = nil
 				continue // wait for another request before retrying
 			}
+			*/
+		}
+
+		proxy, err = sb.HttpProxy()
+		if err != nil {
+			req.w.WriteHeader(http.StatusInternalServerError)
+			req.w.Write([]byte("could not connect to Sandbox: " + err.Error() + "\n"))
+			f.doneChan <- req
+			f.printf("discard sandbox %s due to Channel error: %v", sb.ID(), err)
+			sb = nil
+			continue // wait for another request before retrying
 		}
 
 		// below here, we're guaranteed (1) sb != nil, (2) proxy != nil, (3) sb is unpaused

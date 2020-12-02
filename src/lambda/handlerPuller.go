@@ -100,7 +100,7 @@ func (cp *HandlerPuller) Reset(name string) {
 }
 
 func (cp *HandlerPuller) pullLocalFile(src, lambdaName string) (targetDir string, err error) {
-	log.Printf("[handlerPuller.go 102] pullLocalFile sre path is '%s'\n", src)
+	log.Printf("[handlerPuller.go 102] pullLocalFile src path is '%s'\n", src)
 	stat, err := os.Stat(src) // Stat returns type FileInfo
 	if err != nil {
 		return "", err

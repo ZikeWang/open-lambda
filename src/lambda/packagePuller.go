@@ -224,15 +224,17 @@ func (pp *PackagePuller) InstallRecursive(installs []string) ([]string, error) {
 func (pp *PackagePuller) GetPkg(pkg string) (*Package, error) {
 	// get (or create) package
 	pkg = normalizePkg(pkg)
-	tmp, _ := pp.packages.LoadOrStore(pkg, &Package{name: pkg})
-	p := tmp.(*Package)
+	tmp, _ := pp.packages.LoadOrStore(pkg, &Package{name: pkg}) // 对于这样一个 string->&Package{} 的映射，如果在 pp.packages 中有则直接返回 val，如果没有则先插入 <key, val> 映射再返回 val
+	p := tmp.(*Package) // 返回值 tmp 是 interface{}类型，其实际是 Package{} 这个 struct 的指针，因此要做类型转换访问，*Package 表示访问该结构体指针指向的结构体对象，tmp.(Type) 表示将 interface{} 类型转换为要得到的实际类型
 
 	// fast path
-	if atomic.LoadUint32(&p.installed) == 1 {
+	if atomic.LoadUint32(&p.installed) == 1 { // 原子访问，从 &p.installed 的内存地址处读值，判断该值是否等于 1，即是否已经 installed
+		log.Printf("[packagePuller.go 232] GetPkg goes fast path\n")
 		return p, nil
 	}
 
 	// slow path
+	log.Printf("[packagePuller.go 237] GetPkg goes slow path\n")
 	p.installMutex.Lock()
 	defer p.installMutex.Unlock()
 	if p.installed == 0 {

@@ -139,7 +139,7 @@ func LoadDefaults(olPath string) error {
 		Pkgs_dir:          packagesDir,
 		Sandbox_config:    map[string]interface{}{},
 		SOCK_base_path:    baseImgDir,
-		Registry_cache_ms: 5000, // 5 seconds
+		Registry_cache_ms: 50000, // 原值默认为 5000 即 5 seconds，这里暂时调大以规避一些系统中处理逻辑的问题
 		Mem_pool_mb:       mem_pool_mb,
 		Import_cache_tree: "",
 		Limits: LimitsConfig{
