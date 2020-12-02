@@ -62,14 +62,14 @@ func statsTask() {
 	msSums := make(map[string]int64)
 
 	for raw := range statsChan {
-		switch msg := raw.(type) {
+		switch msg := raw.(type) { // type switch 用于根据类型做选择
 		case *msLatencyMsg:
-			msCounts[msg.name] += 1
-			msSums[msg.name] += msg.x
+			msCounts[msg.name] += 1 // 调用次数的记录加一
+			msSums[msg.name] += msg.x // 累加调用 T0T1 时计算的时间 ms
 		case *snapshotMsg:
-			for k, cnt := range msCounts {
-				msg.stats[k+".cnt"] = cnt
-				msg.stats[k+".ms-avg"] = msSums[k] / cnt
+			for k, cnt := range msCounts { // msCounts:name->cnt，k 为 name 即 Latency.T1() 中传入的 l.name 也即 T0() 的传参
+				msg.stats[k+".cnt"] = cnt // 记录项的调用次数
+				msg.stats[k+".ms-avg"] = msSums[k] / cnt // 记录项平均每次调用用时
 			}
 			msg.done <- true
 		default:
@@ -112,7 +112,7 @@ func (l *Latency) T1() { // 传入的 l 作为基准，其时间为 l.to
 	if l.Milliseconds < 0 {
 		panic("negative latency")
 	}
-	record(l.name, l.Milliseconds)
+	record(l.name, l.Milliseconds) // 统计计时项 name 的调用次数和调用用时
 
 	// make sure we didn't double record
 	var zero time.Time
