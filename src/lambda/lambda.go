@@ -314,6 +314,8 @@ func (f *LambdaFunc) pullHandlerIfStale() (err error) {
 
 	log.Printf("[lambda.go 314] run pullHandlerIfStale, currently the LambdaFunc.codeDir is '%s'\n", f.codeDir)
 
+	t := common.T0("PullHandler")
+
 	// is there new code?
 	// 建立目录 open-lambda/test-dir/worker/code/1001-echo
 	// 将 open-lambda/test-registry/echo 下的文件 f.py 拷贝到上述目录中
@@ -321,7 +323,9 @@ func (f *LambdaFunc) pullHandlerIfStale() (err error) {
 	if err != nil {
 		return err
 	}
-	log.Printf("[lambda.go 321] handler pulled into %s\n", codeDir)
+
+	t.T1()
+	log.Printf("[lambda.go 321] handler pulled into '%s' using %d milliseconds\n", codeDir, t.Milliseconds)
 
 	if codeDir == f.codeDir {
 		return nil
