@@ -19,6 +19,7 @@ import (
 
 // provides thread-safe getting of lambda functions and collects all
 // lambda subsystems (resource pullers and sandbox pools) in one place
+// todo；增加 sb 的记录
 type LambdaMgr struct {
 	// subsystems (these are thread safe)
 	sbPool sandbox.SandboxPool
