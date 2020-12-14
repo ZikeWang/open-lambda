@@ -40,6 +40,7 @@ def init():
 class SockFileHandler(tornado.web.RequestHandler):
     def post(self):
         try:
+            init()
             data = self.request.body
             try :
                 event = json.loads(data)
@@ -59,7 +60,7 @@ tornado_app = tornado.web.Application([
 # listen on sock file with Tornado
 def lambda_server():
     global HOST_PIPE
-    init()
+    #init()
     server = tornado.httpserver.HTTPServer(tornado_app)
     socket = tornado.netutil.bind_unix_socket(SOCK_PATH)
     server.add_socket(socket)

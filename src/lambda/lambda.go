@@ -19,7 +19,6 @@ import (
 
 // provides thread-safe getting of lambda functions and collects all
 // lambda subsystems (resource pullers and sandbox pools) in one place
-// todo；增加 sb 的记录
 type LambdaMgr struct {
 	// subsystems (these are thread safe)
 	sbPool sandbox.SandboxPool
@@ -35,6 +34,22 @@ type LambdaMgr struct {
 	// thread-safe map from a lambda's name to its LambdaFunc
 	mapMutex sync.Mutex
 	lfuncMap map[string]*LambdaFunc
+
+	// 用于维护 docker-pool 的数据结构
+	sbMap   map[int]*SbStats // map 记录了从 “容器ID” 到 “容器状态结构体” 的映射
+	cap     int // docker-pool 的容量，也即当前最大容器编号，若新增容器则从该编号递增
+	lActive *list.List // 处于 active&空闲 状态的容器的ID列表
+	lPause  *list.List // 处于 paused&空闲 状态的容器的ID列表
+	lRun    *list.List // 处于 正在执行任务 状态的容器的ID列表
+	lFree   *list.List // 当容器被销毁后空出来的ID列表，复用ID时从该列表选取编号
+
+}
+
+// 代表单个容器的状态信息集合
+type SbStats struct {
+	id       int             // 容器编号
+	sb       sandbox.Sandbox // 容器实际对象
+	lastFunc string          // 该容器上一次执行的请求函数名称
 }
 
 // Represents a single lambda function (the code)
@@ -89,6 +104,12 @@ type Invocation struct {
 func NewLambdaMgr() (res *LambdaMgr, err error) {
 	mgr := &LambdaMgr{
 		lfuncMap: make(map[string]*LambdaFunc),
+		sbMap:    make(map[int]*SbStats),
+		cap:      0, // 初始为 0 代表没有容器存在
+		lActive:  list.New(),
+		lPause:   list.New(),
+		lRun:     list.New(),
+		lFree:    list.New(),
 	}
 	defer func() {
 		if err != nil {
@@ -140,7 +161,51 @@ func NewLambdaMgr() (res *LambdaMgr, err error) {
 		return nil, err
 	}
 
+	// 预启动一个容器并置于 Active 状态
+	if err = mgr.Prewarm(1); err != nil {
+		log.Printf("[lambda.go 166] prewarm sandbox failed during lambdamgr initiation\n")
+		return nil, err
+	}
+
 	return mgr, nil
+}
+
+// TODO: 这里直接假定要新增 ID 分配给容器，然后创建容器
+// 完整流程需要先判断 lFree 中是否有 ID 可复用；创建容器后需要更新 mgr 中的数据结构
+func (mgr *LambdaMgr) Prewarm(size int) (err error) {
+	log.Printf("[lambda.go 174] begin to prewarm %d sandboxes\n", size)
+	for i := 1; i <= size; i++ {
+		mgr.cap++
+		id := mgr.cap
+
+		// 以容器的id命名创建目录 open-lambda/test-dir/worker/code/id
+		dirID := fmt.Sprintf("%d", id)
+		codeDir := filepath.Join(common.Conf.Worker_dir, "code", dirID)
+		if err = os.Mkdir(codeDir, 0700); err != nil {
+			return err
+		}
+		// 以容器的id命名创建目录 open-lambda/test-dir/worker/scratch/id
+		scratchDir := filepath.Join(common.Conf.Worker_dir, "scratch", dirID)
+		if err = os.Mkdir(scratchDir, 0700); err != nil {
+			return err
+		}
+
+		// 新建容器，其中 SandboxMeta 暂时传入 nil
+		var sb sandbox.Sandbox = nil
+		if sb, err = mgr.sbPool.Create(nil, true, codeDir, scratchDir, nil); err != nil {
+			log.Printf("sbCreate ERR\n")
+			return nil
+		}
+		log.Printf("[lambda.go 201] successfully prewarmed sandbox[id=%d] of %d/%d\n", id, i, size)
+
+		sbStat := &SbStats{
+			id: id,
+			sb: sb,
+		}
+		mgr.sbMap[id] = sbStat
+	}
+
+	return nil
 }
 
 // Returns an existing instance (if there is one), or creates a new one
@@ -457,7 +522,7 @@ func (f *LambdaFunc) Task() {
 			if oldCodeDir != "" && oldCodeDir != f.codeDir {
 				el := f.instances.Front()
 				for el != nil {
-					log.Printf("[lambda.go 455] oldCodeDir<%s> != f.codeDir<%s>, triger LambdaInstance.AsyncKill\n", oldCodeDir, f.codeDir)
+					log.Printf("[lambda.go 455] oldCodeDir '%s' != f.codeDir '%s', triger LambdaInstance.AsyncKill\n", oldCodeDir, f.codeDir)
 					waitChan := el.Value.(*LambdaInstance).AsyncKill()
 					cleanupChan <- waitChan
 					el = el.Next()
@@ -520,6 +585,8 @@ func (f *LambdaFunc) Task() {
 		// let's aim to have 1 sandbox per second of outstanding work
 		inProgressWorkMs := outstandingReqs * execMs.Avg
 		desiredInstances := inProgressWorkMs / 1000
+
+		log.Printf("[lambda.go 543] outstandingReqs = %d, desiredInstances = %d\n", outstandingReqs, desiredInstances)
 
 		// if we have, say, one job that will take 100
 		// seconds, spinning up 100 instances won't do any
@@ -668,8 +735,10 @@ func (linst *LambdaInstance) Task() {
 			if sb == nil {
 				scratchDir := f.lmgr.scratchDirs.Make(f.name)
 				log.Printf("[lambda.go 658] ready to create a new sandbox while import cache is disabled\n")
+				log.Printf("[lambda.go 684] codeDir is '%s', scratchDir is '%s'\n", linst.codeDir, scratchDir)
 				tCREATE := common.T0("sbCreate") // Create a new sandbox 计时起点
 				sb, err = f.lmgr.sbPool.Create(nil, true, linst.codeDir, scratchDir, linst.meta)
+				//sb, err = f.lmgr.sbPool.Create(nil, true, linst.codeDir, scratchDir, nil) // 这里传入的 meta 实际暂时看没什么用
 				tCREATE.T1() // Create a new sandbox 计时终点
 				log.Printf("[lambda.go 665] sandbox launch through create consume %d milliseconds\n", tCREATE.Milliseconds)
 			}

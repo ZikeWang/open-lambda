@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
+	//"log"
 
 	docker "github.com/fsouza/go-dockerclient"
 
