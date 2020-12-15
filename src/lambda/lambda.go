@@ -207,6 +207,12 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 		}
 		log.Printf("[lambda.go 201] successfully prewarmed sandbox[id=%d] of %d/%d\n", id, i, size)
 
+		if err := sb.Pause(); err != nil {
+			log.Printf("sandbox pause failed\n")
+		}
+
+		log.Printf("sandbox paused\n")
+
 		sbStat := &SbStats{
 			id: id,
 			sb: sb,
@@ -773,6 +779,9 @@ func (linst *LambdaInstance) Task() {
 		*/
 
 		sb = f.lmgr.sbMap[1].sb
+		if err := sb.Unpause(); err != nil {
+			log.Printf("sandbox unpause failed\n")
+		}
 
 		proxy, err = sb.HttpProxy()
 		if err != nil {
