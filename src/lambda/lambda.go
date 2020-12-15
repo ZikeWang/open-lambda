@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -190,11 +191,19 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 			return err
 		}
 
+		srcPath := filepath.Join(common.Conf.Registry, "echo", "f.py")
+		log.Printf("[lambda.go 195] srcPath: '%s', codeDir: '%s'\n", srcPath, codeDir)
+		cmd := exec.Command("cp", "-r", srcPath, codeDir)
+		if err = cmd.Run(); err != nil {
+			log.Printf("[lambda.go 210] cp f.py failed with err: %v\n", err)
+			return err
+		}
+
 		// 新建容器，其中 SandboxMeta 暂时传入 nil
 		var sb sandbox.Sandbox = nil
 		if sb, err = mgr.sbPool.Create(nil, true, codeDir, scratchDir, nil); err != nil {
 			log.Printf("sbCreate ERR\n")
-			return nil
+			return err
 		}
 		log.Printf("[lambda.go 201] successfully prewarmed sandbox[id=%d] of %d/%d\n", id, i, size)
 
@@ -698,7 +707,7 @@ func (linst *LambdaInstance) Task() {
 			killed <- true
 			return
 		}
-
+		/*
 		// if we have a sandbox, try unpausing it to see if it is still alive
 		if sb != nil {
 			// Unpause will often fail, because evictors
@@ -749,7 +758,7 @@ func (linst *LambdaInstance) Task() {
 				f.doneChan <- req
 				continue // wait for another request before retrying
 			}
-			/*
+			
 			proxy, err = sb.HttpProxy()
 			if err != nil {
 				req.w.WriteHeader(http.StatusInternalServerError)
@@ -759,8 +768,11 @@ func (linst *LambdaInstance) Task() {
 				sb = nil
 				continue // wait for another request before retrying
 			}
-			*/
+			
 		}
+		*/
+
+		sb = f.lmgr.sbMap[1].sb
 
 		proxy, err = sb.HttpProxy()
 		if err != nil {
