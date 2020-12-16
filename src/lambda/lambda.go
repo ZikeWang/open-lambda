@@ -191,6 +191,8 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 			return err
 		}
 
+		// 拉取代码至容器绑定的代码目录
+		// TODO：注意！这里仅仅是为了测试容器预启动&复用的可行性，这一部分逻辑不应出现在这里
 		srcPath := filepath.Join(common.Conf.Registry, "echo", "f.py")
 		log.Printf("[lambda.go 195] srcPath: '%s', codeDir: '%s'\n", srcPath, codeDir)
 		cmd := exec.Command("cp", "-r", srcPath, codeDir)
@@ -213,11 +215,16 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 
 		log.Printf("sandbox paused\n")
 
+		// 将新建容器的信息存入 mgr 中对应的数据结构
 		sbStat := &SbStats{
 			id: id,
 			sb: sb,
 		}
 		mgr.sbMap[id] = sbStat
+
+		log.Printf("step0: lPause len = %d, lRun len = %d\n", mgr.lPause.Len(), mgr.lRun.Len())
+		mgr.lPause.PushBack(id)
+		log.Printf("step1: lPause len = %d, lRun len = %d\n", mgr.lPause.Len(), mgr.lRun.Len())
 	}
 
 	return nil
@@ -778,7 +785,14 @@ func (linst *LambdaInstance) Task() {
 		}
 		*/
 
-		sb = f.lmgr.sbMap[1].sb
+		log.Printf("step 2: lPause len = %d, lRun len = %d\n", f.lmgr.lPause.Len(), f.lmgr.lRun.Len())
+		el := f.lmgr.lPause.Front()
+		id := el.Value.(int)
+		f.lmgr.lPause.Remove(el)
+		f.lmgr.lRun.PushBack(id)
+		log.Printf("step3: lPause len = %d, lRun len = %d\n", f.lmgr.lPause.Len(), f.lmgr.lRun.Len())
+
+		sb = f.lmgr.sbMap[id].sb
 		if err := sb.Unpause(); err != nil {
 			log.Printf("sandbox unpause failed\n")
 		}
@@ -829,6 +843,10 @@ func (linst *LambdaInstance) Task() {
 			sb = nil
 		}
 		log.Printf("[lambda.go 720] sandbox is paused\n")
+
+		f.lmgr.lRun.Remove(f.lmgr.lRun.Back())
+		f.lmgr.lPause.PushBack(id)
+		log.Printf("step4: lPause len = %d, lRun len = %d\n", f.lmgr.lPause.Len(), f.lmgr.lRun.Len())
 	}
 }
 
