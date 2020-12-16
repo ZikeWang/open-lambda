@@ -337,7 +337,7 @@ func worker(ctx *cli.Context) error {
 			}
 
 			if pid == proc.Pid {
-				fmt.Printf("ready\n")
+				fmt.Printf("worker is ready\n")
 				return nil // server is started and ready for requests
 			} else {
 				return fmt.Errorf("expected PID %v but found %v (port conflict?)", proc.Pid, pid)

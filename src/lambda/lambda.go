@@ -193,7 +193,7 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 
 		// 拉取代码至容器绑定的代码目录
 		// TODO：注意！这里仅仅是为了测试容器预启动&复用的可行性，这一部分逻辑不应出现在这里
-		srcPath := filepath.Join(common.Conf.Registry, "echo", "f.py")
+		srcPath := filepath.Join(common.Conf.Registry, "echo", "echo.py")
 		log.Printf("[lambda.go 195] srcPath: '%s', codeDir: '%s'\n", srcPath, codeDir)
 		cmd := exec.Command("cp", "-r", srcPath, codeDir)
 		if err = cmd.Run(); err != nil {
@@ -805,6 +805,22 @@ func (linst *LambdaInstance) Task() {
 			f.printf("discard sandbox %s due to Channel error: %v", sb.ID(), err)
 			sb = nil
 			continue // wait for another request before retrying
+		}
+
+		log.Printf("[lambda.go 811] begin to write py filename to server_pipe\n")
+		// TODO: pipeFile 路径的前面部分实际就是容器创建时的 scratchDir，因此是否需考虑将该路径保存在容器对应的 sbStats 中
+		pipeFile := filepath.Join("/home/vagrant/open-lambda/test-dir/worker/scratch/1", "server_pipe")
+		pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
+		if err != nil {
+			log.Printf("[lambda.go 815] cannot open server_pipe: %v\n", err)
+			return
+		}
+		defer pipe.Close()
+		
+		// TODO: 这里写入的字符串应该直接读取自 req 的请求函数名，test-registry 中函数文件名应由 f.py 修改为请求名
+		bytes := []byte(f.name) // LambdaFunc.name 保存了请求名(/run/请求名)
+		if _, err = pipe.Write(bytes); err != nil {
+			log.Printf("[lambda.go 823] failed to write func name to server_pipe\n")
 		}
 
 		// below here, we're guaranteed (1) sb != nil, (2) proxy != nil, (3) sb is unpaused
