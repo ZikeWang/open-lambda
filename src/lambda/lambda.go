@@ -106,7 +106,7 @@ func NewLambdaMgr() (res *LambdaMgr, err error) {
 	mgr := &LambdaMgr{
 		lfuncMap: make(map[string]*LambdaFunc),
 		sbMap:    make(map[int]*SbMeta),
-		cap:      0, // 初始为 0 代表没有容器存在
+		cap:      0, // 初始为 0 代表没有容器存在, 第一个容器编号为 1
 		lActive:  list.New(),
 		lPause:   list.New(),
 		//lRun:     list.New(),
@@ -172,7 +172,10 @@ func NewLambdaMgr() (res *LambdaMgr, err error) {
 }
 
 // 冷启动新的容器
-func (mgr *LambdaMgr) LaunchSB() (sb sandbox.Sandbox, id int, scratchDir string, err error)  {
+func (mgr *LambdaMgr) LaunchSB() (sbMeta *SbMeta, err error)  {
+	var sb sandbox.Sandbox
+	var id int
+
 	// 找到一个合适的 ID：1. 先查找 lEmpty；2. 如果 lEmpty 为空则从 cap 递增分配新 id
 	if mgr.lEmpty.Len() > 0 {
 		el := mgr.lEmpty.Front()
@@ -186,10 +189,10 @@ func (mgr *LambdaMgr) LaunchSB() (sb sandbox.Sandbox, id int, scratchDir string,
 
 	// 初始化容器需要绑定为 /host 的本地目录
 	dirID := fmt.Sprintf("%d", id)
-	scratchDir = filepath.Join(common.Conf.Worker_dir, "scratch", dirID)
+	scratchDir := filepath.Join(common.Conf.Worker_dir, "scratch", dirID)
 	if _, err = os.Stat(scratchDir); os.IsNotExist(err) {
 		if err = os.Mkdir(scratchDir, 0700); err != nil {
-			return nil, id, scratchDir, err
+			return nil, err
 		}
 	}
 	codeDir := filepath.Join(common.Conf.Worker_dir, "code")
@@ -197,33 +200,33 @@ func (mgr *LambdaMgr) LaunchSB() (sb sandbox.Sandbox, id int, scratchDir string,
 	// 创建容器
 	if sb, err = mgr.sbPool.Create(nil, true, codeDir, scratchDir, nil); err != nil {
 		log.Printf("[lambda.go LaunchSB()] failed to create sb: %v\n", err)
-		return nil, id, scratchDir, err
+		return nil, err
 	}
 
 	// 登记容器
-	sbMeta := &SbMeta{
+	sbMeta = &SbMeta{
 		id:         id,
 		sb:         sb,
 		scratchDir: scratchDir,
 	}
 	mgr.sbMap[id] = sbMeta
 
-	return sb, id, scratchDir, nil
+	return sbMeta, nil
 }
 
 // TODO: 这里直接假定要新增 ID 分配给容器，然后创建容器
 // 完整流程需要先判断 lFree 中是否有 ID 可复用；创建容器后需要更新 mgr 中的数据结构
 func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 	log.Printf("[lambda.go 174] begin to prewarm %d sandboxes\n", size)
-	var sb sandbox.Sandbox = nil
-	var id int
+	var sbMeta *SbMeta = nil
 
 	for i := 1; i <= size; i++ {
-		if sb, id, _, err = mgr.LaunchSB(); err != nil {
+		if sbMeta, err = mgr.LaunchSB(); err != nil {
 			log.Printf("[lambda.go Prewarm()] failed to launch a new sb: %v\n", err)
 			return err
 		}
-		log.Printf("[lambda.go 201] successfully prewarmed sandbox[id=%d] of %d/%d\n", id, i, size)
+		sb := sbMeta.sb
+		log.Printf("[lambda.go 201] successfully prewarmed sandbox[id=%d] of %d/%d\n", sbMeta.id, i, size)
 
 		// 拉取代码至容器绑定的代码目录
 		srcPath := filepath.Join(common.Conf.Registry, "echo.py")
@@ -242,7 +245,7 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 		log.Printf("sandbox paused\n")
 
 		log.Printf("step0: lPause len = %d\n", mgr.lPause.Len())
-		mgr.lPause.PushBack(id)
+		mgr.lPause.PushBack(sbMeta.id)
 		log.Printf("step1: lPause len = %d\n", mgr.lPause.Len())
 	}
 
@@ -715,43 +718,40 @@ func (f *LambdaFunc) Kill() {
 // 1. 从 lActive 中寻找
 // 2. 当 lActive 为空时，从 lPause 中寻找
 // 3. 当 lActive 和 lPause 中均为空时冷启动
-func (linst *LambdaInstance) GetSB() (sb sandbox.Sandbox, id int, scratchDir string, err error) {
+func (linst *LambdaInstance) GetSB() (sbMeta *SbMeta, err error) {
 	mgr := linst.lfunc.lmgr
-	var el *list.Element = nil
 
 	// 搜索 lActive
 	if mgr.lActive.Len() > 0 {
-		el = mgr.lActive.Front()
-		id = el.Value.(int)
+		el := mgr.lActive.Front()
+		id := el.Value.(int)
 
 		mgr.lActive.Remove(el)
 		//mgr.lRun.PushBack(id)
 
-		scratchDir = mgr.sbMap[id].scratchDir
-		sb = mgr.sbMap[id].sb
+		sbMeta = mgr.sbMap[id]
 	} else if mgr.lPause.Len() > 0 {
-		el = mgr.lPause.Front()
-		id = el.Value.(int)
+		el := mgr.lPause.Front()
+		id := el.Value.(int)
 
 		mgr.lPause.Remove(el)
 		//mgr.lRun.PushBack(id)
 
-		scratchDir = mgr.sbMap[id].scratchDir
-		sb = mgr.sbMap[id].sb
-		if err = sb.Unpause(); err != nil {
+		sbMeta = mgr.sbMap[id]
+		if err = sbMeta.sb.Unpause(); err != nil {
 			log.Printf("[lambda.go GetSB()] Unpause sb failed: %v\n", err)
-			return nil, id, scratchDir, err
+			return nil, err
 		}
 	} else {
 		log.Printf("[lambda.go GetSB()] no sb available in lActive and lPause\n")
 
-		if sb, id, scratchDir, err = mgr.LaunchSB(); err != nil {
+		if sbMeta, err = mgr.LaunchSB(); err != nil {
 			log.Printf("[lambda.go GetSB()] failed to cold start a new sb: %v", err)
-			return nil, id, scratchDir, err
+			return nil, err
 		}
 	}
 
-	return sb, id, scratchDir, nil
+	return sbMeta, nil
 }
 
 // this Task manages a single Sandbox (at any given time), and
@@ -766,11 +766,10 @@ func (linst *LambdaInstance) GetSB() (sb sandbox.Sandbox, id int, scratchDir str
 func (linst *LambdaInstance) Task() {
 	f := linst.lfunc
 
+	var sbMeta *SbMeta = nil
 	var sb sandbox.Sandbox = nil
 	//var client *http.Client = nil // whenever we create a Sandbox, we init this too
 	var proxy *httputil.ReverseProxy = nil // whenever we create a Sandbox, we init this too
-	var id int
-	var scratchDir string
 	var err error
 
 	for {
@@ -854,10 +853,11 @@ func (linst *LambdaInstance) Task() {
 	}
 	*/
 
-		if sb, id, scratchDir, err = linst.GetSB(); err != nil {
+		if sbMeta, err = linst.GetSB(); err != nil {
 			log.Printf("[lambda.go LambdaInstance.Task()] failed to get a sb: %v\n", err)
 			return
 		}
+		sb = sbMeta.sb
 
 		proxy, err = sb.HttpProxy()
 		if err != nil {
@@ -871,7 +871,7 @@ func (linst *LambdaInstance) Task() {
 
 		log.Printf("[lambda.go 811] begin to write py filename to server_pipe\n")
 		// TODO: pipeFile 路径的前面部分实际就是容器创建时的 scratchDir，因此是否需考虑将该路径保存在容器对应的 sbStats 中
-		pipeFile := filepath.Join(scratchDir, "server_pipe")
+		pipeFile := filepath.Join(sbMeta.scratchDir, "server_pipe")
 		pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
 		if err != nil {
 			log.Printf("[lambda.go 815] cannot open server_pipe: %v\n", err)
@@ -922,7 +922,7 @@ func (linst *LambdaInstance) Task() {
 		log.Printf("[lambda.go 720] sandbox is paused\n")
 
 		//f.lmgr.lRun.Remove(f.lmgr.lRun.Back())
-		f.lmgr.lPause.PushBack(id)
+		f.lmgr.lPause.PushBack(sbMeta.id)
 		log.Printf("step4: lPause len = %d\n", f.lmgr.lPause.Len())
 	}
 }
