@@ -48,9 +48,9 @@ type LambdaMgr struct {
 
 // 代表单个容器的状态信息集合
 type SbStats struct {
-	id       int             // 容器编号
-	sb       sandbox.Sandbox // 容器实际对象
-	lastFunc string          // 该容器上一次执行的请求函数名称
+	id         int             // 容器编号
+	sb         sandbox.Sandbox // 容器实际对象
+	scratchDir string          // 容器内 /host 映射到本地的路径
 }
 
 // Represents a single lambda function (the code)
@@ -193,7 +193,7 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 
 		// 拉取代码至容器绑定的代码目录
 		// TODO：注意！这里仅仅是为了测试容器预启动&复用的可行性，这一部分逻辑不应出现在这里
-		srcPath := filepath.Join(common.Conf.Registry, "echo", "echo.py")
+		srcPath := filepath.Join(common.Conf.Registry, "echo.py")
 		log.Printf("[lambda.go 195] srcPath: '%s', codeDir: '%s'\n", srcPath, codeDir)
 		cmd := exec.Command("cp", "-r", srcPath, codeDir)
 		if err = cmd.Run(); err != nil {
@@ -217,8 +217,9 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 
 		// 将新建容器的信息存入 mgr 中对应的数据结构
 		sbStat := &SbStats{
-			id: id,
-			sb: sb,
+			id:         id,
+			sb:         sb,
+			scratchDir: scratchDir,
 		}
 		mgr.sbMap[id] = sbStat
 
@@ -471,7 +472,7 @@ func (f *LambdaFunc) pullHandlerIfStale() (err error) {
 // If either LambdaFunc.funcChan or LambdaFunc.instChan is full, we
 // respond to the client with a backoff message: StatusTooManyRequests
 func (f *LambdaFunc) Task() {
-	f.printf("debug: LambdaFunc.Task() runs on goroutine %d", common.GetGoroutineID())
+	f.printf("debug: LambdaFunc[%s].Task() runs on goroutine %d", f.name, common.GetGoroutineID())
 
 	// we want to perform various cleanup actions, such as killing
 	// instances and deleting old code.  We want to do these
@@ -516,10 +517,10 @@ func (f *LambdaFunc) Task() {
 	loopcnt := 0
 	for {
 		loopcnt += 1
-		log.Printf("[lambda.go 426] LambdaFunc.Task() for loops the %d times\n", loopcnt)
+		log.Printf("[lambda.go 426] LambdaFunc[%s].Task() for loops the %d times\n", f.name, loopcnt)
 		select {
 		case <-timeout.C:
-			log.Printf("[lambda.go 429] LambdaFunc received timeout signal\n")
+			log.Printf("[lambda.go 429] LambdaFunc[%s] received timeout signal\n", f.name)
 			if f.codeDir == "" {
 				continue
 			}
@@ -532,7 +533,7 @@ func (f *LambdaFunc) Task() {
 
 			tHP := common.T0("HP") // Handler and Package pull 计时起点
 			if err := f.pullHandlerIfStale(); err != nil {
-				f.printf("[lambda.go 442] Error checking for new lambda code: %v", err)
+				f.printf("[lambda.go 442] LambdaFunc[%s].Task() calling pullHandlerIfStale failed: %v", f.name, err)
 				req.w.WriteHeader(http.StatusInternalServerError)
 				req.w.Write([]byte(err.Error() + "\n"))
 				req.done <- true
@@ -720,7 +721,8 @@ func (linst *LambdaInstance) Task() {
 			killed <- true
 			return
 		}
-		/*
+	/*
+	if comment == true {
 		// if we have a sandbox, try unpausing it to see if it is still alive
 		if sb != nil {
 			// Unpause will often fail, because evictors
@@ -783,7 +785,8 @@ func (linst *LambdaInstance) Task() {
 			}
 			
 		}
-		*/
+	}
+	*/
 
 		log.Printf("step 2: lPause len = %d, lRun len = %d\n", f.lmgr.lPause.Len(), f.lmgr.lRun.Len())
 		el := f.lmgr.lPause.Front()
@@ -792,7 +795,8 @@ func (linst *LambdaInstance) Task() {
 		f.lmgr.lRun.PushBack(id)
 		log.Printf("step3: lPause len = %d, lRun len = %d\n", f.lmgr.lPause.Len(), f.lmgr.lRun.Len())
 
-		sb = f.lmgr.sbMap[id].sb
+		sbStat := f.lmgr.sbMap[id]
+		sb = sbStat.sb
 		if err := sb.Unpause(); err != nil {
 			log.Printf("sandbox unpause failed\n")
 		}
@@ -809,7 +813,7 @@ func (linst *LambdaInstance) Task() {
 
 		log.Printf("[lambda.go 811] begin to write py filename to server_pipe\n")
 		// TODO: pipeFile 路径的前面部分实际就是容器创建时的 scratchDir，因此是否需考虑将该路径保存在容器对应的 sbStats 中
-		pipeFile := filepath.Join("/home/vagrant/open-lambda/test-dir/worker/scratch/1", "server_pipe")
+		pipeFile := filepath.Join(sbStat.scratchDir, "server_pipe")
 		pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
 		if err != nil {
 			log.Printf("[lambda.go 815] cannot open server_pipe: %v\n", err)
@@ -817,7 +821,6 @@ func (linst *LambdaInstance) Task() {
 		}
 		defer pipe.Close()
 		
-		// TODO: 这里写入的字符串应该直接读取自 req 的请求函数名，test-registry 中函数文件名应由 f.py 修改为请求名
 		bytes := []byte(f.name) // LambdaFunc.name 保存了请求名(/run/请求名)
 		if _, err = pipe.Write(bytes); err != nil {
 			log.Printf("[lambda.go 823] failed to write func name to server_pipe\n")
