@@ -37,17 +37,17 @@ type LambdaMgr struct {
 	lfuncMap map[string]*LambdaFunc
 
 	// 用于维护 docker-pool 的数据结构
-	sbMap   map[int]*SbStats // map 记录了从 “容器ID” 到 “容器状态结构体” 的映射
+	sbMap   map[int]*SbMeta // map 记录了从 “容器ID” 到 “容器状态结构体” 的映射
 	cap     int // docker-pool 的容量，也即当前最大容器编号，若新增容器则从该编号递增
 	lActive *list.List // 处于 active&空闲 状态的容器的ID列表
 	lPause  *list.List // 处于 paused&空闲 状态的容器的ID列表
-	lRun    *list.List // 处于 正在执行任务 状态的容器的ID列表
-	lFree   *list.List // 当容器被销毁后空出来的ID列表，复用ID时从该列表选取编号
+	//lRun    *list.List // 处于 正在执行任务 状态的容器的ID列表
+	lEmpty   *list.List // 当容器被销毁后空出来的ID列表，复用ID时从该列表选取编号
 
 }
 
 // 代表单个容器的状态信息集合
-type SbStats struct {
+type SbMeta struct {
 	id         int             // 容器编号
 	sb         sandbox.Sandbox // 容器实际对象
 	scratchDir string          // 容器内 /host 映射到本地的路径
@@ -105,12 +105,12 @@ type Invocation struct {
 func NewLambdaMgr() (res *LambdaMgr, err error) {
 	mgr := &LambdaMgr{
 		lfuncMap: make(map[string]*LambdaFunc),
-		sbMap:    make(map[int]*SbStats),
+		sbMap:    make(map[int]*SbMeta),
 		cap:      0, // 初始为 0 代表没有容器存在
 		lActive:  list.New(),
 		lPause:   list.New(),
-		lRun:     list.New(),
-		lFree:    list.New(),
+		//lRun:     list.New(),
+		lEmpty:    list.New(),
 	}
 	defer func() {
 		if err != nil {
@@ -171,29 +171,63 @@ func NewLambdaMgr() (res *LambdaMgr, err error) {
 	return mgr, nil
 }
 
+// 冷启动新的容器
+func (mgr *LambdaMgr) LaunchSB() (sb sandbox.Sandbox, id int, scratchDir string, err error)  {
+	// 找到一个合适的 ID：1. 先查找 lEmpty；2. 如果 lEmpty 为空则从 cap 递增分配新 id
+	if mgr.lEmpty.Len() > 0 {
+		el := mgr.lEmpty.Front()
+		id = el.Value.(int)
+
+		mgr.lEmpty.Remove(el)
+	} else {
+		mgr.cap++
+		id = mgr.cap
+	}
+
+	// 初始化容器需要绑定为 /host 的本地目录
+	dirID := fmt.Sprintf("%d", id)
+	scratchDir = filepath.Join(common.Conf.Worker_dir, "scratch", dirID)
+	if _, err = os.Stat(scratchDir); os.IsNotExist(err) {
+		if err = os.Mkdir(scratchDir, 0700); err != nil {
+			return nil, id, scratchDir, err
+		}
+	}
+	codeDir := filepath.Join(common.Conf.Worker_dir, "code")
+
+	// 创建容器
+	if sb, err = mgr.sbPool.Create(nil, true, codeDir, scratchDir, nil); err != nil {
+		log.Printf("[lambda.go LaunchSB()] failed to create sb: %v\n", err)
+		return nil, id, scratchDir, err
+	}
+
+	// 登记容器
+	sbMeta := &SbMeta{
+		id:         id,
+		sb:         sb,
+		scratchDir: scratchDir,
+	}
+	mgr.sbMap[id] = sbMeta
+
+	return sb, id, scratchDir, nil
+}
+
 // TODO: 这里直接假定要新增 ID 分配给容器，然后创建容器
 // 完整流程需要先判断 lFree 中是否有 ID 可复用；创建容器后需要更新 mgr 中的数据结构
 func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 	log.Printf("[lambda.go 174] begin to prewarm %d sandboxes\n", size)
-	for i := 1; i <= size; i++ {
-		mgr.cap++
-		id := mgr.cap
+	var sb sandbox.Sandbox = nil
+	var id int
 
-		// 以容器的id命名创建目录 open-lambda/test-dir/worker/code/id
-		dirID := fmt.Sprintf("%d", id)
-		codeDir := filepath.Join(common.Conf.Worker_dir, "code", dirID)
-		if err = os.Mkdir(codeDir, 0700); err != nil {
+	for i := 1; i <= size; i++ {
+		if sb, id, _, err = mgr.LaunchSB(); err != nil {
+			log.Printf("[lambda.go Prewarm()] failed to launch a new sb: %v\n", err)
 			return err
 		}
-		// 以容器的id命名创建目录 open-lambda/test-dir/worker/scratch/id
-		scratchDir := filepath.Join(common.Conf.Worker_dir, "scratch", dirID)
-		if err = os.Mkdir(scratchDir, 0700); err != nil {
-			return err
-		}
+		log.Printf("[lambda.go 201] successfully prewarmed sandbox[id=%d] of %d/%d\n", id, i, size)
 
 		// 拉取代码至容器绑定的代码目录
-		// TODO：注意！这里仅仅是为了测试容器预启动&复用的可行性，这一部分逻辑不应出现在这里
 		srcPath := filepath.Join(common.Conf.Registry, "echo.py")
+		codeDir := filepath.Join(common.Conf.Worker_dir, "code")
 		log.Printf("[lambda.go 195] srcPath: '%s', codeDir: '%s'\n", srcPath, codeDir)
 		cmd := exec.Command("cp", "-r", srcPath, codeDir)
 		if err = cmd.Run(); err != nil {
@@ -201,31 +235,15 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 			return err
 		}
 
-		// 新建容器，其中 SandboxMeta 暂时传入 nil
-		var sb sandbox.Sandbox = nil
-		if sb, err = mgr.sbPool.Create(nil, true, codeDir, scratchDir, nil); err != nil {
-			log.Printf("sbCreate ERR\n")
-			return err
-		}
-		log.Printf("[lambda.go 201] successfully prewarmed sandbox[id=%d] of %d/%d\n", id, i, size)
-
-		if err := sb.Pause(); err != nil {
+		if err = sb.Pause(); err != nil {
 			log.Printf("sandbox pause failed\n")
 		}
 
 		log.Printf("sandbox paused\n")
 
-		// 将新建容器的信息存入 mgr 中对应的数据结构
-		sbStat := &SbStats{
-			id:         id,
-			sb:         sb,
-			scratchDir: scratchDir,
-		}
-		mgr.sbMap[id] = sbStat
-
-		log.Printf("step0: lPause len = %d, lRun len = %d\n", mgr.lPause.Len(), mgr.lRun.Len())
+		log.Printf("step0: lPause len = %d\n", mgr.lPause.Len())
 		mgr.lPause.PushBack(id)
-		log.Printf("step1: lPause len = %d, lRun len = %d\n", mgr.lPause.Len(), mgr.lRun.Len())
+		log.Printf("step1: lPause len = %d\n", mgr.lPause.Len())
 	}
 
 	return nil
@@ -529,7 +547,7 @@ func (f *LambdaFunc) Task() {
 
 			// check for new code, and cleanup old code
 			// (and instances that use it) if necessary
-			oldCodeDir := f.codeDir
+			/*oldCodeDir := f.codeDir
 
 			tHP := common.T0("HP") // Handler and Package pull 计时起点
 			if err := f.pullHandlerIfStale(); err != nil {
@@ -559,6 +577,7 @@ func (f *LambdaFunc) Task() {
 			}
 
 			f.lmgr.DepTracer.TraceInvocation(f.codeDir)
+			*/
 
 			select {
 			case f.instChan <- req:
@@ -668,9 +687,11 @@ func (f *LambdaFunc) Task() {
 }
 
 func (f *LambdaFunc) newInstance() {
+	/*
 	if f.codeDir == "" {
 		panic("cannot start instance until code has been fetched")
 	}
+	*/
 
 	linst := &LambdaInstance{
 		lfunc:    f,
@@ -690,6 +711,49 @@ func (f *LambdaFunc) Kill() {
 	<-done
 }
 
+// 获取一个可用的 sandbox
+// 1. 从 lActive 中寻找
+// 2. 当 lActive 为空时，从 lPause 中寻找
+// 3. 当 lActive 和 lPause 中均为空时冷启动
+func (linst *LambdaInstance) GetSB() (sb sandbox.Sandbox, id int, scratchDir string, err error) {
+	mgr := linst.lfunc.lmgr
+	var el *list.Element = nil
+
+	// 搜索 lActive
+	if mgr.lActive.Len() > 0 {
+		el = mgr.lActive.Front()
+		id = el.Value.(int)
+
+		mgr.lActive.Remove(el)
+		//mgr.lRun.PushBack(id)
+
+		scratchDir = mgr.sbMap[id].scratchDir
+		sb = mgr.sbMap[id].sb
+	} else if mgr.lPause.Len() > 0 {
+		el = mgr.lPause.Front()
+		id = el.Value.(int)
+
+		mgr.lPause.Remove(el)
+		//mgr.lRun.PushBack(id)
+
+		scratchDir = mgr.sbMap[id].scratchDir
+		sb = mgr.sbMap[id].sb
+		if err = sb.Unpause(); err != nil {
+			log.Printf("[lambda.go GetSB()] Unpause sb failed: %v\n", err)
+			return nil, id, scratchDir, err
+		}
+	} else {
+		log.Printf("[lambda.go GetSB()] no sb available in lActive and lPause\n")
+
+		if sb, id, scratchDir, err = mgr.LaunchSB(); err != nil {
+			log.Printf("[lambda.go GetSB()] failed to cold start a new sb: %v", err)
+			return nil, id, scratchDir, err
+		}
+	}
+
+	return sb, id, scratchDir, nil
+}
+
 // this Task manages a single Sandbox (at any given time), and
 // forwards requests from the function queue to that Sandbox.
 // when there are no requests, the Sandbox is paused.
@@ -705,6 +769,8 @@ func (linst *LambdaInstance) Task() {
 	var sb sandbox.Sandbox = nil
 	//var client *http.Client = nil // whenever we create a Sandbox, we init this too
 	var proxy *httputil.ReverseProxy = nil // whenever we create a Sandbox, we init this too
+	var id int
+	var scratchDir string
 	var err error
 
 	for {
@@ -788,17 +854,9 @@ func (linst *LambdaInstance) Task() {
 	}
 	*/
 
-		log.Printf("step 2: lPause len = %d, lRun len = %d\n", f.lmgr.lPause.Len(), f.lmgr.lRun.Len())
-		el := f.lmgr.lPause.Front()
-		id := el.Value.(int)
-		f.lmgr.lPause.Remove(el)
-		f.lmgr.lRun.PushBack(id)
-		log.Printf("step3: lPause len = %d, lRun len = %d\n", f.lmgr.lPause.Len(), f.lmgr.lRun.Len())
-
-		sbStat := f.lmgr.sbMap[id]
-		sb = sbStat.sb
-		if err := sb.Unpause(); err != nil {
-			log.Printf("sandbox unpause failed\n")
+		if sb, id, scratchDir, err = linst.GetSB(); err != nil {
+			log.Printf("[lambda.go LambdaInstance.Task()] failed to get a sb: %v\n", err)
+			return
 		}
 
 		proxy, err = sb.HttpProxy()
@@ -813,7 +871,7 @@ func (linst *LambdaInstance) Task() {
 
 		log.Printf("[lambda.go 811] begin to write py filename to server_pipe\n")
 		// TODO: pipeFile 路径的前面部分实际就是容器创建时的 scratchDir，因此是否需考虑将该路径保存在容器对应的 sbStats 中
-		pipeFile := filepath.Join(sbStat.scratchDir, "server_pipe")
+		pipeFile := filepath.Join(scratchDir, "server_pipe")
 		pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
 		if err != nil {
 			log.Printf("[lambda.go 815] cannot open server_pipe: %v\n", err)
@@ -863,9 +921,9 @@ func (linst *LambdaInstance) Task() {
 		}
 		log.Printf("[lambda.go 720] sandbox is paused\n")
 
-		f.lmgr.lRun.Remove(f.lmgr.lRun.Back())
+		//f.lmgr.lRun.Remove(f.lmgr.lRun.Back())
 		f.lmgr.lPause.PushBack(id)
-		log.Printf("step4: lPause len = %d, lRun len = %d\n", f.lmgr.lPause.Len(), f.lmgr.lRun.Len())
+		log.Printf("step4: lPause len = %d\n", f.lmgr.lPause.Len())
 	}
 }
 
