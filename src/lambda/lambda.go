@@ -32,6 +32,8 @@ type LambdaMgr struct {
 	codeDirs    *common.DirMaker
 	scratchDirs *common.DirMaker
 
+	codeDir string
+
 	// thread-safe map from a lambda's name to its LambdaFunc
 	mapMutex sync.Mutex
 	lfuncMap map[string]*LambdaFunc
@@ -124,6 +126,11 @@ func NewLambdaMgr() (res *LambdaMgr, err error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// 显式保存 string 类型地共享代码目录路径 open-lambda/test-dir/worker/code
+	// mgr.codeDirs 类型为 common.DirMaker
+	mgr.codeDir = filepath.Join(common.Conf.Worker_dir, "code")
+
 	// 在 open-lambda/test-dir/worker 下新建目录 scratch 并将路径赋值给 LambdaMgr.scratchDirs
 	mgr.scratchDirs, err = common.NewDirMaker("scratch", common.Conf.Storage.Scratch.Mode()) // Mode: STORE_REGULAR
 	if err != nil {
@@ -195,10 +202,9 @@ func (mgr *LambdaMgr) LaunchSB() (sbMeta *SbMeta, err error)  {
 			return nil, err
 		}
 	}
-	codeDir := filepath.Join(common.Conf.Worker_dir, "code")
 
 	// 创建容器
-	if sb, err = mgr.sbPool.Create(nil, true, codeDir, scratchDir, nil); err != nil {
+	if sb, err = mgr.sbPool.Create(nil, true, mgr.codeDir, scratchDir, nil); err != nil {
 		log.Printf("[lambda.go LaunchSB()] failed to create sb: %v\n", err)
 		return nil, err
 	}
@@ -227,16 +233,6 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 		}
 		sb := sbMeta.sb
 		log.Printf("[lambda.go 201] successfully prewarmed sandbox[id=%d] of %d/%d\n", sbMeta.id, i, size)
-
-		// 拉取代码至容器绑定的代码目录
-		srcPath := filepath.Join(common.Conf.Registry, "echo.py")
-		codeDir := filepath.Join(common.Conf.Worker_dir, "code")
-		log.Printf("[lambda.go 195] srcPath: '%s', codeDir: '%s'\n", srcPath, codeDir)
-		cmd := exec.Command("cp", "-r", srcPath, codeDir)
-		if err = cmd.Run(); err != nil {
-			log.Printf("[lambda.go 210] cp f.py failed with err: %v\n", err)
-			return err
-		}
 
 		if err = sb.Pause(); err != nil {
 			log.Printf("sandbox pause failed\n")
@@ -550,7 +546,9 @@ func (f *LambdaFunc) Task() {
 
 			// check for new code, and cleanup old code
 			// (and instances that use it) if necessary
-			/*oldCodeDir := f.codeDir
+		/*
+		if comment == true {
+			oldCodeDir := f.codeDir
 
 			tHP := common.T0("HP") // Handler and Package pull 计时起点
 			if err := f.pullHandlerIfStale(); err != nil {
@@ -580,7 +578,20 @@ func (f *LambdaFunc) Task() {
 			}
 
 			f.lmgr.DepTracer.TraceInvocation(f.codeDir)
-			*/
+		}
+		*/
+			// 1. 判断目标 handler 是否在 mgr.codeDir
+			// 2. 如果不存在则从 test-registry 拉取 .py 文件至 mgr.codeDir
+			handlerPath := filepath.Join(f.lmgr.codeDir, f.name) + ".py" // 这里不能把 f.name 放在 filepath.Join 里，否则就成了 /f.name/.py
+			if _, err := os.Stat(handlerPath); os.IsNotExist(err) {
+				srcPath := filepath.Join(common.Conf.Registry, f.name) + ".py"
+				log.Printf("[lambda.go LambdaFunc.Task()] handler is not exist in codeDir, ready to pull from %s to %s\n", srcPath, f.lmgr.codeDir)
+				cmd := exec.Command("cp", srcPath, f.lmgr.codeDir)
+				if err = cmd.Run(); err != nil {
+					log.Printf("[lambda.go LambdaFunc.Task()] cp %s.py failed with err: %v\n", f.name, err)
+					return
+				}
+			}
 
 			select {
 			case f.instChan <- req:
