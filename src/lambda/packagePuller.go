@@ -140,7 +140,7 @@ func NewPackagePuller(sbPool sandbox.SandboxPool, depTracer *DepTracer) (*Packag
 	if err := os.MkdirAll(pipLambda, 0700); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(pipLambda, "f.py") // 创建文件 open-lambda/test-dir/worker/admin-lambdas/pip-install/f.py
+	path := filepath.Join(pipLambda, "installLambda.py") // 创建文件 open-lambda/test-dir/worker/admin-lambdas/pip-install/f.py
 	code := []byte(installLambda)
 	if err := ioutil.WriteFile(path, code, 0600); err != nil {
 		return nil, err
@@ -297,6 +297,21 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	proxy, err := sb.HttpProxy()
 	if err != nil {
 		return err
+	}
+
+	// 向容器发送需要执行的 py 文件的文件名
+	log.Printf("[packagePuller.go sandboxInstall()] begin to write 'installLambda' to server_pipe\n")
+	pipeFile := filepath.Join(scratchDir, "server_pipe")
+	pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
+	if err != nil {
+		log.Printf("[lambda.go 815] cannot open server_pipe: %v\n", err)
+		return
+	}
+	defer pipe.Close()
+	
+	fname := []byte("installLambda")
+	if _, err = pipe.Write(fname); err != nil {
+		log.Printf("[packagePuller.go sandboxInstall()] failed to write 'installLambda' to server_pipe\n")
 	}
 
 	// we still need to run a Sandbox to parse the dependencies, even if it is already installed

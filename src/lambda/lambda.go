@@ -360,11 +360,12 @@ func (f *LambdaFunc) printf(format string, args ...interface{}) {
 //
 // Lambdas should have /handler/packages in their path, but not
 // /packages.
-func parseMeta(codeDir string) (meta *sandbox.SandboxMeta, err error) {
+func parseMeta(codeDir string, funcName string) (meta *sandbox.SandboxMeta, err error) {
 	installs := make([]string, 0)
 	imports := make([]string, 0)
 
-	path := filepath.Join(codeDir, "f.py")
+	//path := filepath.Join(codeDir, "f.py")
+	path := filepath.Join(codeDir, funcName) + ".py"
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -402,6 +403,7 @@ func parseMeta(codeDir string) (meta *sandbox.SandboxMeta, err error) {
 	}, nil
 }
 
+/*
 // if there is any error:
 // 1. we won't switch to the new code
 // 2. we won't update pull time (so well check for a fix next tim)
@@ -469,6 +471,7 @@ func (f *LambdaFunc) pullHandlerIfStale() (err error) {
 	f.lastPull = &now
 	return nil
 }
+*/
 
 // this Task receives lambda requests, fetches new lambda code as
 // needed, and dispatches to a set of lambda instances.  Task also
@@ -591,6 +594,19 @@ func (f *LambdaFunc) Task() {
 					log.Printf("[lambda.go LambdaFunc.Task()] cp %s.py failed with err: %v\n", f.name, err)
 					return
 				}
+			}
+
+			// 1. 解析代码文件获取待下载的 pkg，这里修改了 parseMeta 的传参
+			// 2. 调用 package.InstallRecursive 下载 pkg
+			meta, err := parseMeta(f.lmgr.codeDir, f.name)
+			if err != nil {
+				log.Printf("[lambda.go LambdaFunc.Task()] parseMeta failed with err: %v\n", err)
+				return
+			}
+
+			if meta.Installs, err = f.lmgr.PackagePuller.InstallRecursive(meta.Installs); err != nil {
+				log.Printf("[lambda.go LambdaFunc.Task()] packagePull InstallRecursive failed with err: %v\n", err)
+				return
 			}
 
 			select {
@@ -881,7 +897,6 @@ func (linst *LambdaInstance) Task() {
 		}
 
 		log.Printf("[lambda.go 811] begin to write py filename to server_pipe\n")
-		// TODO: pipeFile 路径的前面部分实际就是容器创建时的 scratchDir，因此是否需考虑将该路径保存在容器对应的 sbStats 中
 		pipeFile := filepath.Join(sbMeta.scratchDir, "server_pipe")
 		pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
 		if err != nil {
@@ -890,8 +905,8 @@ func (linst *LambdaInstance) Task() {
 		}
 		defer pipe.Close()
 		
-		bytes := []byte(f.name) // LambdaFunc.name 保存了请求名(/run/请求名)
-		if _, err = pipe.Write(bytes); err != nil {
+		fname := []byte(f.name) // LambdaFunc.name 保存了请求名(/run/请求名)
+		if _, err = pipe.Write(fname); err != nil {
 			log.Printf("[lambda.go 823] failed to write func name to server_pipe\n")
 		}
 
