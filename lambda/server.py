@@ -10,6 +10,7 @@ import tornado.netutil
 HOST_DIR = '/host'
 PKGS_DIR = '/packages'
 HANDLER_DIR = '/handler'
+LOG_PATH = '/home/log.txt' # 记录被执行的 handler 的文件名
 
 sys.path.append(PKGS_DIR)
 sys.path.append(HANDLER_DIR)
@@ -28,9 +29,11 @@ parser.add_argument('--cache', action='store_true', default=False, help='Begin a
 
 # run after forking into sandbox
 def init():
-    global initialized, f, modname
-    if initialized:
-        return
+    global ff, modname
+    #global initialized
+
+    #if initialized:
+    #    return
 
     # 原实现限制了要执行的代码文件命名必须为 f.py
     # 以下实现扩展了这种 import 方式，支持从管道读取字符串然后 import 同名文件
@@ -43,9 +46,12 @@ def init():
         modname = file.read() # 从命名管道中读取文件名
         file.close()
 
-    f = importlib.import_module(modname) # import 不支持直接追加字符串执行，因此需要调用该库函数，将文件作为模块导入
+    fout = open(LOG_PATH, "a")
+    fout.write(modname + '\n')
 
-    initialized = True
+    ff = importlib.import_module(modname) # import 不支持直接追加字符串执行，因此需要调用该库函数，将文件作为模块导入
+
+    #initialized = True
 
 class SockFileHandler(tornado.web.RequestHandler):
     def post(self):
@@ -58,7 +64,7 @@ class SockFileHandler(tornado.web.RequestHandler):
                 self.set_status(400)
                 self.write('bad POST data: "%s"'%str(data))
                 return
-            self.write(json.dumps(f.f(event)))
+            self.write(json.dumps(ff.f(event)))
         except Exception:
             self.set_status(500) # internal error
             self.write(traceback.format_exc())

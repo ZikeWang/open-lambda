@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/open-lambda/open-lambda/ol/common"
 	"github.com/open-lambda/open-lambda/ol/sandbox"
@@ -114,7 +115,9 @@ type PackagePuller struct {
 	// directory of lambda code that installs pip packages
 	pipLambda string
 
-	packages sync.Map
+	packages  sync.Map
+
+	sb        sandbox.Sandbox // 容器实际对象
 }
 
 type Package struct {
@@ -147,10 +150,23 @@ func NewPackagePuller(sbPool sandbox.SandboxPool, depTracer *DepTracer) (*Packag
 		return nil, err
 	}
 
+	// 创建容器
+	meta := &sandbox.SandboxMeta{
+		MemLimitMB: common.Conf.Limits.Installer_mem_mb,
+	}
+	// pipLambda路径： open-lambda/test-dir/worker/admin-lambdas/pip-install
+	// common.Conf.Pkgs_dir路径：open-lambda/test-dir/lambda/packages
+	sb, err := sbPool.Create(nil, true, pipLambda, common.Conf.Pkgs_dir, meta)
+	if err != nil {
+		log.Printf("[packagePuller.go NewPackagePuller()] Failed to create sandbox with err: %s\n", err)
+		return nil, err
+	}
+
 	installer := &PackagePuller{
 		sbPool:    sbPool,
 		depTracer: depTracer,
 		pipLambda: pipLambda,
+		sb:        sb,
 	}
 
 	return installer, nil
@@ -188,7 +204,7 @@ func (pp *PackagePuller) InstallRecursive(installs []string) ([]string, error) {
 	for i := 0; i < len(installs); i++ {
 		pkg := installs[i]
 		if common.Conf.Trace.Package {
-			log.Printf("On %v of %v", pkg, installs)
+			log.Printf("[packagePuller.go InstallRecursive()] On '%v' of '%v'", pkg, installs)
 		}
 		p, err := pp.GetPkg(pkg)
 		if err != nil {
@@ -201,8 +217,7 @@ func (pp *PackagePuller) InstallRecursive(installs []string) ([]string, error) {
 		}
 		*/
 
-		log.Printf("[packagePuller.go 203] Package '%s' has Deps %v", pkg, p.meta.Deps)
-		log.Printf("[packagePuller.go 204] Package '%s' has TopLevel modules %v", pkg, p.meta.TopLevel)
+		log.Printf("[packagePuller.go InstallRecursive()] Pkg[%s] has Deps: %v; TopLevel: %v\n", pkg, p.meta.Deps, p.meta.TopLevel)
 
 		// push any previously unseen deps on the list of ones to install
 		for _, dep := range p.meta.Deps {
@@ -230,12 +245,12 @@ func (pp *PackagePuller) GetPkg(pkg string) (*Package, error) {
 
 	// fast path
 	if atomic.LoadUint32(&p.installed) == 1 { // 原子访问，从 &p.installed 的内存地址处读值，判断该值是否等于 1，即是否已经 installed
-		log.Printf("[packagePuller.go 232] GetPkg goes fast path\n")
+		log.Printf("[packagePuller.go GetPkg()] fast path\n")
 		return p, nil
 	}
 
 	// slow path
-	log.Printf("[packagePuller.go 237] GetPkg goes slow path\n")
+	log.Printf("[packagePuller.go GetPkg()] slow path\n")
 	p.installMutex.Lock()
 	defer p.installMutex.Unlock()
 	if p.installed == 0 {
@@ -261,17 +276,20 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	// the pip-install lambda installs to /host, which is the the
 	// same as scratchDir, which is the same as a sub-directory
 	// named after the package in the packages dir
-	scratchDir := filepath.Join(common.Conf.Pkgs_dir, p.name) // open-lambda/test-dir/lambda/package/<package_name>
-	log.Printf("do pip install, using scratchDir='%v'", scratchDir)
+
+	// scratchDir路径：open-lambda/test-dir/lambda/packages/<package_name>
+	scratchDir := filepath.Join(common.Conf.Pkgs_dir, p.name)
 
 	alreadyInstalled := false
 	if _, err := os.Stat(scratchDir); err == nil { // 判断 scratchDir 是否存在
 		// assume dir exististence means it is installed already
-		log.Printf("%s appears already installed from previous run of OL", p.name)
+		// 如果 Pkg 的目录存在，那么其至少安装过一次(包括该 Pkg 依赖的其他 Pkgs)，直接返回
+		// 跳过后续创建容器并传入 alreadyInstalled = true 这一部分冗余逻辑
+		log.Printf("[packagePuller.go sandboxInstall()] [%s] appears already installed from previous run of OL", p.name)
 		alreadyInstalled = true
-		return nil // 如果 Pkg 的目录存在，那么其至少安装过一次(包括该 Pkg 依赖的其他 Pkgs)，直接返回，跳过后续创建容器并传入 alreadyInstalled = true 这一部分冗余逻辑
-	} else { // 如果不存在则创建相应的 scratchDir 目录
-		log.Printf("run pip install %s from a new Sandbox to %s on host", p.name, scratchDir)
+		return nil
+	} else {
+		// 如果不存在则创建相应的 scratchDir 目录
 		if err := os.Mkdir(scratchDir, 0700); err != nil {
 			return err
 		}
@@ -283,45 +301,17 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 		}
 	}()
 
-	meta := &sandbox.SandboxMeta{
-		MemLimitMB: common.Conf.Limits.Installer_mem_mb,
-	}
-	// pipLambda路径： open-lambda/test-dir/worker/admin-lambdas/pip-install
-	// common.Conf.Pkgs_dir路径：open-lambda/test-dir/lambda/packages
-	// scratchDir路径：open-lambda/test-dir/lambda/packages/<package_name>
-	sb, err := pp.sbPool.Create(nil, true, pp.pipLambda, common.Conf.Pkgs_dir, meta)
-	if err != nil {
-		log.Printf("[packagePuller.go 289] Failed to create sandbox using sbPool.Create\n")
-		return err
-	}
-	defer sb.Destroy()
-
+	sb := pp.sb
 	proxy, err := sb.HttpProxy()
 	if err != nil {
-		return err
+		return nil
 	}
-
-	/*
-	// 向容器发送需要执行的 py 文件的文件名
-	log.Printf("[packagePuller.go sandboxInstall()] begin to write 'installLambda' to server_pipe\n")
-	pipeFile := filepath.Join(common.Conf.Pkgs_dir, "server_pipe")
-	pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
-	if err != nil {
-		log.Printf("[lambda.go 815] cannot open server_pipe: %v\n", err)
-		return
-	}
-	defer pipe.Close()
-	
-	fname := []byte("installLambda")
-	if _, err = pipe.Write(fname); err != nil {
-		log.Printf("[packagePuller.go sandboxInstall()] failed to write 'installLambda' to server_pipe\n")
-	}
-	*/
 
 	// we still need to run a Sandbox to parse the dependencies, even if it is already installed
 	msg := fmt.Sprintf(`{"pkg": "%s", "alreadyInstalled": %v}`, p.name, alreadyInstalled)
 	reqBody := bytes.NewReader([]byte(msg))
 	// the URL doesn't matter, since it is local anyway
+	fmt.Printf("pkg[%s] sent: %v\n", p.name, time.Now().UnixNano() / 1e6)
 	req, err := http.NewRequest("POST", "http://container/run/pip-install", reqBody)
 	if err != nil {
 		return err
@@ -330,6 +320,7 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	if err != nil {
 		return err
 	}
+	fmt.Printf("pkg[%s] received: %v\n", p.name, time.Now().UnixNano() / 1e6)
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -351,7 +342,7 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 		return err
 	}
 
-	log.Printf("[packagePuller.go 332] pipLambda install result [Deps] [TopLevel]: '%s'", p.meta)
+	log.Printf("[packagePuller.go sandboxInstall()] pkg[%s] install result [Deps] [TopLevel]: '%s'", p.name, p.meta)
 
 	for i, pkg := range p.meta.Deps {
 		p.meta.Deps[i] = normalizePkg(pkg)

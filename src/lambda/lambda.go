@@ -170,7 +170,7 @@ func NewLambdaMgr() (res *LambdaMgr, err error) {
 	}
 
 	// 预启动一个容器并置于 Active 状态
-	if err = mgr.Prewarm(1); err != nil {
+	if err = mgr.Prewarm(2); err != nil {
 		log.Printf("[lambda.go 166] prewarm sandbox failed during lambdamgr initiation\n")
 		return nil, err
 	}
@@ -232,17 +232,19 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 			return err
 		}
 		sb := sbMeta.sb
-		log.Printf("[lambda.go 201] successfully prewarmed sandbox[id=%d] of %d/%d\n", sbMeta.id, i, size)
-
+		log.Printf("[lambda.go Prewarm()] successfully prewarmed sandbox[id=%d] of %d/%d\n", sbMeta.id, i, size)
+		
 		if err = sb.Pause(); err != nil {
-			log.Printf("sandbox pause failed\n")
+			log.Printf("[lambda.go Prewarm()]sandbox pause failed\n")
 		}
-
-		log.Printf("sandbox paused\n")
+		
+		log.Printf("[lambda.go Prewarm()] sandbox[id=%d] paused\n", sbMeta.id)
 
 		log.Printf("step0: lPause len = %d\n", mgr.lPause.Len())
 		mgr.lPause.PushBack(sbMeta.id)
 		log.Printf("step1: lPause len = %d\n", mgr.lPause.Len())
+		
+		//mgr.lActive.PushBack(sbMeta.id)
 	}
 
 	return nil
@@ -256,7 +258,7 @@ func (mgr *LambdaMgr) Get(name string) (f *LambdaFunc) {
 	f = mgr.lfuncMap[name]
 
 	if f == nil {
-		log.Printf("[lambda.go 151] lfuncMap[%s] is nil, new LambdaFunc", name)
+		log.Printf("[lambda.go Get()] new entry lfuncMap[%s]\n", name)
 		f = &LambdaFunc{
 			lmgr:      mgr,
 			name:      name,
@@ -314,7 +316,6 @@ func (mgr *LambdaMgr) Cleanup() {
 }
 
 func (f *LambdaFunc) Invoke(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[lambda.go 209] execute Invoke()")
 	t := common.T0("LambdaFunc.Invoke")
 	defer t.T1()
 
@@ -537,10 +538,9 @@ func (f *LambdaFunc) Task() {
 	loopcnt := 0
 	for {
 		loopcnt += 1
-		log.Printf("[lambda.go 426] LambdaFunc[%s].Task() for loops the %d times\n", f.name, loopcnt)
+		log.Printf("[lambda.go lfunc.Task()] lfunc[%s].Task() for loops the %d times\n", f.name, loopcnt)
 		select {
 		case <-timeout.C:
-			log.Printf("[lambda.go 429] LambdaFunc[%s] received timeout signal\n", f.name)
 			if f.codeDir == "" {
 				continue
 			}
@@ -588,10 +588,10 @@ func (f *LambdaFunc) Task() {
 			handlerPath := filepath.Join(f.lmgr.codeDir, f.name) + ".py" // 这里不能把 f.name 放在 filepath.Join 里，否则就成了 /f.name/.py
 			if _, err := os.Stat(handlerPath); os.IsNotExist(err) {
 				srcPath := filepath.Join(common.Conf.Registry, f.name) + ".py"
-				log.Printf("[lambda.go LambdaFunc.Task()] handler is not exist in codeDir, ready to pull from %s to %s\n", srcPath, f.lmgr.codeDir)
+				log.Printf("[lambda.go lfunc.Task()] pull handler '%s.py', src: %s, dest: %s\n", f.name, srcPath, f.lmgr.codeDir)
 				cmd := exec.Command("cp", srcPath, f.lmgr.codeDir)
 				if err = cmd.Run(); err != nil {
-					log.Printf("[lambda.go LambdaFunc.Task()] cp %s.py failed with err: %v\n", f.name, err)
+					log.Printf("[lambda.go lfunc.Task()] cp %s.py failed with err: %v\n", f.name, err)
 					return
 				}
 			}
@@ -600,12 +600,12 @@ func (f *LambdaFunc) Task() {
 			// 2. 调用 package.InstallRecursive 下载 pkg
 			meta, err := parseMeta(f.lmgr.codeDir, f.name)
 			if err != nil {
-				log.Printf("[lambda.go LambdaFunc.Task()] parseMeta failed with err: %v\n", err)
+				log.Printf("[lambda.go lfunc.Task()] parseMeta failed with err: %v\n", err)
 				return
 			}
 
 			if meta.Installs, err = f.lmgr.PackagePuller.InstallRecursive(meta.Installs); err != nil {
-				log.Printf("[lambda.go LambdaFunc.Task()] packagePull InstallRecursive failed with err: %v\n", err)
+				log.Printf("[lambda.go lfunc.Task()] download pkgs failed with err: %v\n", err)
 				return
 			}
 
@@ -620,7 +620,7 @@ func (f *LambdaFunc) Task() {
 				req.done <- true
 			}
 		case req := <-f.doneChan:
-			log.Printf("[lambda.go 462] LambdaFunc received doneChan signal\n")
+			log.Printf("[lambda.go lfunc.Task()] received doneChan signal\n")
 			// msg: instance -> function
 
 			execMs.Add(req.execMs)
@@ -630,7 +630,7 @@ func (f *LambdaFunc) Task() {
 			req.done <- true
 
 		case done := <-f.killChan:
-			log.Printf("[lambda.go 472] LambdaFunc received killChan signal\n")
+			log.Printf("[lambda.go lfunc.Task()] received killChan signal\n")
 			// signal all instances to die, then wait for
 			// cleanup task to finish and exit
 			el := f.instances.Front()
@@ -648,8 +648,6 @@ func (f *LambdaFunc) Task() {
 			return
 		}
 
-		log.Printf("[lambda.go 507] LambdaFunc.Task() executing after select\n")
-
 		// POLICY: how many instances (i.e., virtual sandboxes) should we allocate?
 
 		// AUTOSCALING STEP 1: decide how many instances we want
@@ -658,7 +656,7 @@ func (f *LambdaFunc) Task() {
 		inProgressWorkMs := outstandingReqs * execMs.Avg
 		desiredInstances := inProgressWorkMs / 1000
 
-		log.Printf("[lambda.go 543] outstandingReqs = %d, desiredInstances = %d\n", outstandingReqs, desiredInstances)
+		log.Printf("[lambda.go lfunc.Task()] outstandingReqs = %d, desiredInstances = %d\n", outstandingReqs, desiredInstances)
 
 		// if we have, say, one job that will take 100
 		// seconds, spinning up 100 instances won't do any
@@ -681,9 +679,9 @@ func (f *LambdaFunc) Task() {
 		if lastScaling != nil {
 			elapsed := now.Sub(*lastScaling)
 			if elapsed < adjustFreq {
-				log.Printf("[lambda.go 538] elapsed time < 1s\n")
+				log.Printf("[lambda.go lfunc.Task()] elapsed time < 1s\n")
 				if desiredInstances != f.instances.Len() {
-					log.Printf("[lambda.go 540] LambdaFunc adjust new timeout interval\n")
+					log.Printf("[lambda.go lfunc.Task()] adjust new timeout interval\n")
 					timeout = time.NewTimer(adjustFreq - elapsed)
 				}
 				continue
@@ -697,7 +695,7 @@ func (f *LambdaFunc) Task() {
 			f.newInstance()
 			lastScaling = &now
 		} else if f.instances.Len() > desiredInstances {
-			log.Printf("[lambda.go 554] execute LambdaInstance AsyncKill\n")
+			log.Printf("[lambda.go lfunc.Task()] execute LambdaInstance AsyncKill\n")
 			f.printf("reduce instances to %d", f.instances.Len()-1)
 			waitChan := f.instances.Back().Value.(*LambdaInstance).AsyncKill()
 			f.instances.Remove(f.instances.Back())
@@ -706,7 +704,7 @@ func (f *LambdaFunc) Task() {
 		}
 
 		if f.instances.Len() != desiredInstances {
-			log.Printf("[lambda.go 563] current instances numbers != desired numbers\n")
+			log.Printf("[lambda.go lfunc.Task()] current instances numbers[%d] != desired numbers[%d]\n", f.instances.Len(), desiredInstances)
 			// we can only adjust quickly, so we want to
 			// run through this loop again as soon as
 			// possible, even if there are no requests to
@@ -881,10 +879,11 @@ func (linst *LambdaInstance) Task() {
 	*/
 
 		if sbMeta, err = linst.GetSB(); err != nil {
-			log.Printf("[lambda.go LambdaInstance.Task()] failed to get a sb: %v\n", err)
+			log.Printf("[lambda.go linst.Task()] failed to get a sb: %v\n", err)
 			return
 		}
 		sb = sbMeta.sb
+		log.Printf("[lambda.go linst.Task()] lfunc[%s] instance get sb[%d]\n", f.name, sbMeta.id)
 
 		proxy, err = sb.HttpProxy()
 		if err != nil {
@@ -896,37 +895,37 @@ func (linst *LambdaInstance) Task() {
 			continue // wait for another request before retrying
 		}
 
-		log.Printf("[lambda.go 811] begin to write py filename to server_pipe\n")
 		pipeFile := filepath.Join(sbMeta.scratchDir, "server_pipe")
 		pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
 		if err != nil {
-			log.Printf("[lambda.go 815] cannot open server_pipe: %v\n", err)
+			log.Printf("[lambda.go linst.Task()] cannot open server_pipe: %v\n", err)
 			return
 		}
 		defer pipe.Close()
 		
 		fname := []byte(f.name) // LambdaFunc.name 保存了请求名(/run/请求名)
 		if _, err = pipe.Write(fname); err != nil {
-			log.Printf("[lambda.go 823] failed to write func name to server_pipe\n")
+			log.Printf("[lambda.go linst.Task()] failed to write filename[%s] to server_pipe\n", f.name)
 		}
+		log.Printf("[lambda.go linst.Task()] filename[%s] has been written to server_pipe\n", f.name)
 
 		// below here, we're guaranteed (1) sb != nil, (2) proxy != nil, (3) sb is unpaused
 
 		// serve until we incoming queue is empty
 		for req != nil {
-			log.Printf("[lambda.go 685] begin to serve HTTP request\n")
+			log.Printf("[lambda.go linst.Task()] begin to serve HTTP request\n")
 			// ask Sandbox to respond, via HTTP proxy
 			tHTTP := common.T0("ServeHTTP")
 			proxy.ServeHTTP(req.w, req.r)
 			tHTTP.T1()
-			log.Printf("[lambda.go 690] ServeHTTP consume %d milliseconds\n", tHTTP.Milliseconds)
+			log.Printf("[lambda.go linst.Task()] ServeHTTP consume %d milliseconds\n", tHTTP.Milliseconds)
 			req.execMs = int(tHTTP.Milliseconds)
 			f.doneChan <- req
 
 			// check whether we should shutdown (non-blocking)
 			select {
 			case killed := <-linst.killChan:
-				log.Printf("[lambda.go 697] execute sb destroy in LambdaInstance.Task()\n")
+				log.Printf("[lambda.go linst.Task()] execute sb destroy\n")
 				sb.Destroy()
 				killed <- true
 				return
@@ -945,11 +944,13 @@ func (linst *LambdaInstance) Task() {
 			f.printf("discard sandbox %s due to Pause error: %v", sb.ID(), err)
 			sb = nil
 		}
-		log.Printf("[lambda.go 720] sandbox is paused\n")
+		log.Printf("[lambda.go linst.Task()] sandbox is paused\n")
 
 		//f.lmgr.lRun.Remove(f.lmgr.lRun.Back())
 		f.lmgr.lPause.PushBack(sbMeta.id)
 		log.Printf("step4: lPause len = %d\n", f.lmgr.lPause.Len())
+		
+		//f.lmgr.lActive.PushBack(sbMeta.id)
 	}
 }
 
