@@ -28,21 +28,20 @@ parser.add_argument('--cache', action='store_true', default=False, help='Begin a
 
 # run after forking into sandbox
 def init():
-    global initialized, f
+    global initialized, f, modname
     if initialized:
         return
 
-    # assume submitted .py file is /handler/f.py
     # 原实现限制了要执行的代码文件命名必须为 f.py
     # 以下实现扩展了这种 import 方式，支持从管道读取字符串然后 import 同名文件
-    file = open(SERVER_PIPE_PATH, 'r')
-
-    fd = file.fileno()
-    fcntl.fcntl(fd, fcntl.F_SETFL, os.O_NONBLOCK) # 将命名管道 server_pipe 设置为非阻塞，否则 read() 无法返回
-
-    modname = file.read() # 从命名管道中读取文件名
-
-    file.close()
+    if os.path.exists(HANDLER_DIR + "/installLambda.py"):
+        modname = "installLambda"
+    else:
+        file = open(SERVER_PIPE_PATH, 'r')
+        fd = file.fileno()
+        fcntl.fcntl(fd, fcntl.F_SETFL, os.O_NONBLOCK) # 将命名管道 server_pipe 设置为非阻塞，否则 read() 无法返回
+        modname = file.read() # 从命名管道中读取文件名
+        file.close()
 
     f = importlib.import_module(modname) # import 不支持直接追加字符串执行，因此需要调用该库函数，将文件作为模块导入
 

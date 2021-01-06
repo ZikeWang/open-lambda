@@ -92,13 +92,14 @@ def deps(dirname):
 def f(event):
     pkg = event["pkg"]
     alreadyInstalled = event["alreadyInstalled"]
+    path = "/host/" + pkg + "/files"
     if not alreadyInstalled:
-        rc = os.system('pip3 install --no-deps %s -t /host/files' % pkg)
+        rc = os.system('pip3 install --no-deps %s -t %s' % (pkg, path))
         print('pip install returned code %d' % rc)
         assert(rc == 0)
     name = pkg.split("==")[0]
-    d = deps("/host/files")
-    t = top("/host/files")
+    d = deps(path)
+    t = top(path)
     return {"Deps":d, "TopLevel":t}
 `
 
@@ -264,12 +265,12 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	log.Printf("do pip install, using scratchDir='%v'", scratchDir)
 
 	alreadyInstalled := false
-	if _, err := os.Stat(scratchDir); err == nil {
+	if _, err := os.Stat(scratchDir); err == nil { // 判断 scratchDir 是否存在
 		// assume dir exististence means it is installed already
 		log.Printf("%s appears already installed from previous run of OL", p.name)
 		alreadyInstalled = true
-		return nil // 如果 Pkg 的目录存在，那么其至少安装过一次(包括该 Pkg 依赖的其他 Pkgs)，直接返回，跳过创建容器的冗余逻辑
-	} else {
+		return nil // 如果 Pkg 的目录存在，那么其至少安装过一次(包括该 Pkg 依赖的其他 Pkgs)，直接返回，跳过后续创建容器并传入 alreadyInstalled = true 这一部分冗余逻辑
+	} else { // 如果不存在则创建相应的 scratchDir 目录
 		log.Printf("run pip install %s from a new Sandbox to %s on host", p.name, scratchDir)
 		if err := os.Mkdir(scratchDir, 0700); err != nil {
 			return err
@@ -286,8 +287,9 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 		MemLimitMB: common.Conf.Limits.Installer_mem_mb,
 	}
 	// pipLambda路径： open-lambda/test-dir/worker/admin-lambdas/pip-install
+	// common.Conf.Pkgs_dir路径：open-lambda/test-dir/lambda/packages
 	// scratchDir路径：open-lambda/test-dir/lambda/packages/<package_name>
-	sb, err := pp.sbPool.Create(nil, true, pp.pipLambda, scratchDir, meta)
+	sb, err := pp.sbPool.Create(nil, true, pp.pipLambda, common.Conf.Pkgs_dir, meta)
 	if err != nil {
 		log.Printf("[packagePuller.go 289] Failed to create sandbox using sbPool.Create\n")
 		return err
@@ -299,9 +301,10 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 		return err
 	}
 
+	/*
 	// 向容器发送需要执行的 py 文件的文件名
 	log.Printf("[packagePuller.go sandboxInstall()] begin to write 'installLambda' to server_pipe\n")
-	pipeFile := filepath.Join(scratchDir, "server_pipe")
+	pipeFile := filepath.Join(common.Conf.Pkgs_dir, "server_pipe")
 	pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
 	if err != nil {
 		log.Printf("[lambda.go 815] cannot open server_pipe: %v\n", err)
@@ -313,6 +316,7 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	if _, err = pipe.Write(fname); err != nil {
 		log.Printf("[packagePuller.go sandboxInstall()] failed to write 'installLambda' to server_pipe\n")
 	}
+	*/
 
 	// we still need to run a Sandbox to parse the dependencies, even if it is already installed
 	msg := fmt.Sprintf(`{"pkg": "%s", "alreadyInstalled": %v}`, p.name, alreadyInstalled)
