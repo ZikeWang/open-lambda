@@ -48,11 +48,6 @@ def init():
         file.close()
 
     exec_cnt += 1
-    flog = open(LOG_PATH, "a")
-    tm = time.time()
-    stm = str(exec_cnt) + ' : ' + modname + ' : import func : ' + str(tm)
-    flog.write(stm + '\n')
-
     ff = importlib.import_module(modname) # import 不支持直接追加字符串执行，因此需要调用该库函数，将文件作为模块导入
 
     #initialized = True
@@ -69,19 +64,19 @@ class SockFileHandler(tornado.web.RequestHandler):
                 self.write('bad POST data: "%s"'%str(data))
                 return
 
-            # 函数调用计时起点
             flog = open(LOG_PATH, "a")
+
+            # 函数调用计时起点
             tm1 = time.time()
-            stm1 = str(exec_cnt) + ' : ' + modname + ' : call starts : ' + str(tm1)
-            flog.write(stm1 + '\n')
+            stm = str(exec_cnt) + ' : ' + modname + ' : call start : ' + str(tm1) + '\n'
 
             self.write(json.dumps(ff.f(event)))
 
             # 函数调用计时终点
-            flog = open(LOG_PATH, "a")
             tm2 = time.time()
-            stm2 = str(exec_cnt) + ' : ' + modname + ' : call ends   : ' + str(tm2)
-            flog.write(stm2 + '\n')
+            stm += str(exec_cnt) + ' : ' + modname + ' : call end   : ' + str(tm2) + '\n'
+
+            flog.write(stm)
         except Exception:
             self.set_status(500) # internal error
             self.write(traceback.format_exc())
