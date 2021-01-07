@@ -948,6 +948,7 @@ func (linst *LambdaInstance) Task() {
 
 		//f.lmgr.lRun.Remove(f.lmgr.lRun.Back())
 		f.lmgr.lPause.PushBack(sbMeta.id)
+		//sb = nil
 		log.Printf("step4: lPause len = %d\n", f.lmgr.lPause.Len())
 		
 		//f.lmgr.lActive.PushBack(sbMeta.id)
