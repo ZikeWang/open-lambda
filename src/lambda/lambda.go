@@ -45,7 +45,7 @@ type LambdaMgr struct {
 	lPause  *list.List // 处于 paused&空闲 状态的容器的ID列表
 	//lRun    *list.List // 处于 正在执行任务 状态的容器的ID列表
 	lEmpty   *list.List // 当容器被销毁后空出来的ID列表，复用ID时从该列表选取编号
-
+	killWarmChan chan bool // 经 mgr.KillPreWarmer() 发送 true 信号后, mgr.PreWarmer() 接收信号跳出 for 循环
 }
 
 // 代表单个容器的状态信息集合
@@ -113,6 +113,7 @@ func NewLambdaMgr() (res *LambdaMgr, err error) {
 		lPause:   list.New(),
 		//lRun:     list.New(),
 		lEmpty:    list.New(),
+		killWarmChan: make(chan bool, 1),
 	}
 	defer func() {
 		if err != nil {
@@ -256,10 +257,13 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 func (mgr *LambdaMgr) PreWarmer() {
 	LOOP: for {
 		select {
-		case <- time.After(time.Millisecond * time.Duration(1000)): // loop per 50ms to adjust the pool
+		case <- mgr.killWarmChan: // a signal to break out of for-select infinite loop
+			log.Printf("[lambda.go PreWarmer()] receive killWarmChan signal, ready to break out of for-select loop\n")	
+			break LOOP // break 跳出 select 外层的 for 循环，如果不使用标签则只是跳出 select
+		case <- time.After(time.Millisecond * time.Duration(5000)): // loop per 50ms to adjust the pool
 			log.Printf("[lambda.go Prewarmer()] get into for-select loop, lActive's len = %d\n", mgr.lActive.Len())	
 		
-		// 1. check len of lActive/lPause
+			// 1. check len of lActive/lPause
 			// 2. decide whether to adjust sb numbers
 			//var incr int // 需要预热启动的容器数量，最小为 0
 			incr := 2
@@ -270,7 +274,7 @@ func (mgr *LambdaMgr) PreWarmer() {
 				wg.Add(1)
 				go func(i int, mgr *LambdaMgr, wg *sync.WaitGroup) {
 					t1 := time.Now()
-					log.Printf("[lambda.go PreWarmer()] goroutine[%d] starts at %v ms\n", i, t1.UnixNano() / 1e6)
+					log.Printf("[lambda.go PreWarmer()] goroutine[%d] begins at %v ms, lActive len = %d\n", i, t1.UnixNano() / 1e6, mgr.lActive.Len())
 
 					defer wg.Done()
 
@@ -279,29 +283,29 @@ func (mgr *LambdaMgr) PreWarmer() {
 						log.Printf("[lambda.go PreWarmer()] goroutine[%d] failed to launch a new sb: %v\n", i, err)
 						return
 					}
-					log.Printf("[lambda.go PreWarmer()] goroutine[%d] launched a new sb[%d] at %v ms\n", i, sbMeta.id, time.Now().UnixNano() / 1e6)
 					
 					mgr.lActive.PushBack(sbMeta.id)
-					log.Printf("[lambda.go PreWarmer()] goroutine[%d] added sb[%d] to lActive(after: len = %d) at %v ms\n", i, sbMeta.id, mgr.lActive.Len(), time.Now().UnixNano() / 1e6)
 
 					t2 := time.Now()
-					duration := int64(t2.Sub(t1)) / 1000000
-					log.Printf("[lamdba.go PreWarmer()] goroutine[%d] ends at %v ms, duration = %d ms\n", i, t2.UnixNano() / 1e6, duration)
+					log.Printf("[lamdba.go PreWarmer()] goroutine[%d] finished at %v ms using %d ms : sb[%d] launched, lActive len = %d\n", 
+									i, t2.UnixNano() / 1e6, int64(t2.Sub(t1)) / 1000000, sbMeta.id, mgr.lActive.Len())
 				}(i, mgr, wg)
 			}
 			
 			wg.Wait()
-			log.Printf("[lambda.go PreWarmer()] successfully launched %d sandboxs and added to lActive(after: len = %d)\n", incr, mgr.lActive.Len())
-			break LOOP
-		case <- time.After(time.Millisecond * time.Duration(2000)): // a signal to end, i.e., ol kill
-			log.Printf("[lambda.go PreWarmer()] Receive terminate signal, break for-select loop\n")	
-			break LOOP // break 跳出 select 外层的 for 循环，如果不使用标签则只是跳出 select
+			log.Printf("[lambda.go PreWarmer()] successfully launched %d sandboxs, lActive len = %d\n", incr, mgr.lActive.Len())
+			//break LOOP
 		}
 	}
 
-	log.Printf("[lambda.go Prewarmer()] jump out of for-select loop\n")
+	log.Printf("[lambda.go Prewarmer()] jumped out of for-select loop, PreWarmer goroutine finished\n")
 }
 
+// 通过 killWarmChan 通知 PreWarmer 结束 for-select 循环
+func (mgr *LambdaMgr) KillPreWarmer() {
+	mgr.killWarmChan <- true
+	log.Printf("[lambda.go KillPreWarmer()] 'true' signal sent to mgr.killWarmChan\n")
+}
 
 // Returns an existing instance (if there is one), or creates a new one
 func (mgr *LambdaMgr) Get(name string) (f *LambdaFunc) {
@@ -334,6 +338,8 @@ func (mgr *LambdaMgr) Debug() string {
 }
 
 func (mgr *LambdaMgr) Cleanup() {
+	mgr.KillPreWarmer()
+
 	mgr.mapMutex.Lock() // don't unlock, because this shouldn't be used anymore
 
 	// HandlerPuller+PackagePuller requires no cleanup
