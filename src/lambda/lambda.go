@@ -168,12 +168,15 @@ func NewLambdaMgr() (res *LambdaMgr, err error) {
 	if err != nil {
 		return nil, err
 	}
-
+	/*
 	// 预启动一个容器并置于 Active 状态
 	if err = mgr.Prewarm(2); err != nil {
 		log.Printf("[lambda.go 166] prewarm sandbox failed during lambdamgr initiation\n")
 		return nil, err
 	}
+	*/
+
+	go mgr.PreWarmer()
 
 	return mgr, nil
 }
@@ -249,6 +252,56 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 
 	return nil
 }
+
+func (mgr *LambdaMgr) PreWarmer() {
+	LOOP: for {
+		select {
+		case <- time.After(time.Millisecond * time.Duration(1000)): // loop per 50ms to adjust the pool
+			log.Printf("[lambda.go Prewarmer()] get into for-select loop, lActive's len = %d\n", mgr.lActive.Len())	
+		
+		// 1. check len of lActive/lPause
+			// 2. decide whether to adjust sb numbers
+			//var incr int // 需要预热启动的容器数量，最小为 0
+			incr := 2
+	
+			// 3. do the changes
+			var wg = new(sync.WaitGroup)
+			for i := 1; i <= incr; i++ {
+				wg.Add(1)
+				go func(i int, mgr *LambdaMgr, wg *sync.WaitGroup) {
+					t1 := time.Now()
+					log.Printf("[lambda.go PreWarmer()] goroutine[%d] starts at %v ms\n", i, t1.UnixNano() / 1e6)
+
+					defer wg.Done()
+
+					sbMeta, err := mgr.LaunchSB()
+					if err != nil {
+						log.Printf("[lambda.go PreWarmer()] goroutine[%d] failed to launch a new sb: %v\n", i, err)
+						return
+					}
+					log.Printf("[lambda.go PreWarmer()] goroutine[%d] launched a new sb[%d] at %v ms\n", i, sbMeta.id, time.Now().UnixNano() / 1e6)
+					
+					mgr.lActive.PushBack(sbMeta.id)
+					log.Printf("[lambda.go PreWarmer()] goroutine[%d] added sb[%d] to lActive(after: len = %d) at %v ms\n", i, sbMeta.id, mgr.lActive.Len(), time.Now().UnixNano() / 1e6)
+
+					t2 := time.Now()
+					duration := int64(t2.Sub(t1)) / 1000000
+					log.Printf("[lamdba.go PreWarmer()] goroutine[%d] ends at %v ms, duration = %d ms\n", i, t2.UnixNano() / 1e6, duration)
+				}(i, mgr, wg)
+			}
+			
+			wg.Wait()
+			log.Printf("[lambda.go PreWarmer()] successfully launched %d sandboxs and added to lActive(after: len = %d)\n", incr, mgr.lActive.Len())
+			break LOOP
+		case <- time.After(time.Millisecond * time.Duration(2000)): // a signal to end, i.e., ol kill
+			log.Printf("[lambda.go PreWarmer()] Receive terminate signal, break for-select loop\n")	
+			break LOOP // break 跳出 select 外层的 for 循环，如果不使用标签则只是跳出 select
+		}
+	}
+
+	log.Printf("[lambda.go Prewarmer()] jump out of for-select loop\n")
+}
+
 
 // Returns an existing instance (if there is one), or creates a new one
 func (mgr *LambdaMgr) Get(name string) (f *LambdaFunc) {
@@ -755,6 +808,7 @@ func (linst *LambdaInstance) GetSB() (sbMeta *SbMeta, err error) {
 		//mgr.lRun.PushBack(id)
 
 		sbMeta = mgr.sbMap[id]
+		log.Printf("[lambda.go GetSB()] linst get a sb from lActive\n")
 	} else if mgr.lPause.Len() > 0 {
 		el := mgr.lPause.Front()
 		id := el.Value.(int)
@@ -767,13 +821,14 @@ func (linst *LambdaInstance) GetSB() (sbMeta *SbMeta, err error) {
 			log.Printf("[lambda.go GetSB()] Unpause sb failed: %v\n", err)
 			return nil, err
 		}
+		log.Printf("[lambda.go GetSB()] linst get a sb from lPause and unpause it successfully\n")
 	} else {
-		log.Printf("[lambda.go GetSB()] no sb available in lActive and lPause\n")
-
 		if sbMeta, err = mgr.LaunchSB(); err != nil {
 			log.Printf("[lambda.go GetSB()] failed to cold start a new sb: %v", err)
 			return nil, err
 		}
+
+		log.Printf("[lambda.go GetSB()] linst get a new sb by cold start\n")
 	}
 
 	return sbMeta, nil
@@ -944,12 +999,12 @@ func (linst *LambdaInstance) Task() {
 			f.printf("discard sandbox %s due to Pause error: %v", sb.ID(), err)
 			sb = nil
 		}
-		log.Printf("[lambda.go linst.Task()] sandbox is paused\n")
+		log.Printf("[lambda.go linst.Task()] sandbox[%d] is paused\n", sbMeta.id)
 
 		//f.lmgr.lRun.Remove(f.lmgr.lRun.Back())
 		f.lmgr.lPause.PushBack(sbMeta.id)
 		//sb = nil
-		log.Printf("step4: lPause len = %d\n", f.lmgr.lPause.Len())
+		log.Printf("[lambda.go linst.Task()] sandbox[%d] has been added to lPause, len = %d\n", sbMeta.id, f.lmgr.lPause.Len())
 		
 		//f.lmgr.lActive.PushBack(sbMeta.id)
 	}
