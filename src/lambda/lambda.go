@@ -255,26 +255,52 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 }
 
 func (mgr *LambdaMgr) PreWarmer() {
+	var lALen int = mgr.lActive.Len() // lActive 的原始长度/上一轮 for-select 循环结束时的长度
+	var staticIncr int = 2 // 固定预留容器数量，即当 lActive = 0 且没有请求时，也要预留以备用的数量
+	// var dynamicIncr int = 0
+	var incr int = 0 // 实际新增的容器数量
+
 	LOOP: for {
 		select {
 		case <- mgr.killWarmChan: // a signal to break out of for-select infinite loop
 			log.Printf("[lambda.go PreWarmer()] receive killWarmChan signal, ready to break out of for-select loop\n")	
 			break LOOP // break 跳出 select 外层的 for 循环，如果不使用标签则只是跳出 select
 		case <- time.After(time.Millisecond * time.Duration(5000)): // loop per 50ms to adjust the pool
-			log.Printf("[lambda.go Prewarmer()] get into for-select loop, lActive's len = %d\n", mgr.lActive.Len())	
+			log.Printf("[lambda.go Prewarmer()] iteration began: lActive: %d\n", mgr.lActive.Len())	
 		
-			// 1. check len of lActive/lPause
-			// 2. decide whether to adjust sb numbers
-			//var incr int // 需要预热启动的容器数量，最小为 0
-			incr := 2
-	
-			// 3. do the changes
+			// 计算一个统计周期内可用容器数量的变化量，即：
+			// 上一周期结束时 lActive 长度 + 上一周期结束后 PreWarmer 创建的容器 - 本周期开始时 lActive 长度
+			// 若结果为正值则表示周期内可用容器数减少，说明需要在本轮补充容器
+			// 若结果为负值则表示周期内可用容器数增加，可能来源于 linst 使用完释放的容器，则本轮不需补充
+			deltaSB := lALen + incr - mgr.lActive.Len()
+			lALen = mgr.lActive.Len()
+			log.Printf("[lambda.go PreWarmer] decreased %d available sandboxes\n", deltaSB)
+
+			if deltaSB > 0 {
+				log.Printf("1\n")
+				incr = 1 // TODO: 如何确定需要增加的容器数
+			} else {
+				if mgr.lActive.Len() == 0 {
+					incr = staticIncr
+					log.Printf("2\n")
+				} else {
+					log.Printf("3\n")
+					incr = 0 // TODO: 何时考虑释放容器资源
+				}
+			}
+			log.Printf("[lambda.go PreWarmer()] ready to prewarm %d sandboxes\n", incr)
+			
+			// 如果要预热启动多个容器，则采用 goroutine 的方式并行执行容器创建
+			// 但 PreWarmer 内采用 “获取指标->决定增量->实施创建” 的串行逻辑
+			// 因此采用 WaitGroup 等待所有并行执行的 goroutine 结束后才进入下一轮 select 
 			var wg = new(sync.WaitGroup)
+
 			for i := 1; i <= incr; i++ {
 				wg.Add(1)
 				go func(i int, mgr *LambdaMgr, wg *sync.WaitGroup) {
 					t1 := time.Now()
-					log.Printf("[lambda.go PreWarmer()] goroutine[%d] begins at %v ms, lActive len = %d\n", i, t1.UnixNano() / 1e6, mgr.lActive.Len())
+					log.Printf("[lambda.go PreWarmer()] goroutine[%d] began at %v ms; lActive: %d\n", 
+									i, t1.UnixNano() / 1e6, mgr.lActive.Len())
 
 					defer wg.Done()
 
@@ -287,18 +313,17 @@ func (mgr *LambdaMgr) PreWarmer() {
 					mgr.lActive.PushBack(sbMeta.id)
 
 					t2 := time.Now()
-					log.Printf("[lamdba.go PreWarmer()] goroutine[%d] finished at %v ms using %d ms : sb[%d] launched, lActive len = %d\n", 
-									i, t2.UnixNano() / 1e6, int64(t2.Sub(t1)) / 1000000, sbMeta.id, mgr.lActive.Len())
+					log.Printf("[lamdba.go PreWarmer()] goroutine[%d] ended at %v ms; lActive: %d, with sb[%d] launched; consumed %d ms\n", 
+									i, t2.UnixNano() / 1e6, mgr.lActive.Len(), sbMeta.id, int64(t2.Sub(t1)) / 1000000)
 				}(i, mgr, wg)
 			}
 			
 			wg.Wait()
-			log.Printf("[lambda.go PreWarmer()] successfully launched %d sandboxs, lActive len = %d\n", incr, mgr.lActive.Len())
-			//break LOOP
+			log.Printf("[lambda.go PreWarmer()] iteration ended: lActive: %d, with %d sandboxes launched\n", mgr.lActive.Len(), incr)
 		}
 	}
 
-	log.Printf("[lambda.go Prewarmer()] jumped out of for-select loop, PreWarmer goroutine finished\n")
+	log.Printf("[lambda.go Prewarmer()] jumped out of for-select loop, PreWarmer terminated\n")
 }
 
 // 通过 killWarmChan 通知 PreWarmer 结束 for-select 循环
@@ -594,10 +619,7 @@ func (f *LambdaFunc) Task() {
 	var lastScaling *time.Time = nil
 	timeout := time.NewTimer(0) // 最少 0 (ns) 后向 timeout->C 发送当前的时间
 
-	loopcnt := 0
 	for {
-		loopcnt += 1
-		log.Printf("[lambda.go lfunc.Task()] lfunc[%s].Task() for loops the %d times\n", f.name, loopcnt)
 		select {
 		case <-timeout.C:
 			if f.codeDir == "" {
