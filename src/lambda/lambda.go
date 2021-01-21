@@ -39,12 +39,19 @@ type LambdaMgr struct {
 	lfuncMap map[string]*LambdaFunc
 
 	// 用于维护 docker-pool 的数据结构
+	sbMapMutex sync.Mutex // 对 sbMap 的操作加锁
 	sbMap   map[int]*SbMeta // map 记录了从 “容器ID” 到 “容器状态结构体” 的映射
 	cap     int // docker-pool 的容量，也即当前最大容器编号，若新增容器则从该编号递增
+
+	lAMutex sync.Mutex // 对 lActive 的操作加锁
 	lActive *list.List // 处于 active&空闲 状态的容器的ID列表
+
+	lPMutex sync.Mutex // 对 lPause 的操作加锁
 	lPause  *list.List // 处于 paused&空闲 状态的容器的ID列表
+
 	//lRun    *list.List // 处于 正在执行任务 状态的容器的ID列表
 	lEmpty   *list.List // 当容器被销毁后空出来的ID列表，复用ID时从该列表选取编号
+
 	killWarmChan chan bool // 经 mgr.KillPreWarmer() 发送 true 信号后, mgr.PreWarmer() 接收信号跳出 for 循环
 }
 
@@ -214,6 +221,9 @@ func (mgr *LambdaMgr) LaunchSB() (sbMeta *SbMeta, err error)  {
 	}
 
 	// 登记容器
+	mgr.sbMapMutex.Lock()
+	defer mgr.sbMapMutex.Unlock()
+
 	sbMeta = &SbMeta{
 		id:         id,
 		sb:         sb,
@@ -227,7 +237,7 @@ func (mgr *LambdaMgr) LaunchSB() (sbMeta *SbMeta, err error)  {
 // TODO: 这里直接假定要新增 ID 分配给容器，然后创建容器
 // 完整流程需要先判断 lFree 中是否有 ID 可复用；创建容器后需要更新 mgr 中的数据结构
 func (mgr *LambdaMgr) Prewarm(size int) (err error) {
-	log.Printf("[lambda.go 174] begin to prewarm %d sandboxes\n", size)
+	log.Printf("[lambda.go 174] ready to prewarm %d sandboxes, lPause: %d\n", size, mgr.lPause.Len())
 	var sbMeta *SbMeta = nil
 
 	for i := 1; i <= size; i++ {
@@ -236,19 +246,18 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 			return err
 		}
 		sb := sbMeta.sb
-		log.Printf("[lambda.go Prewarm()] successfully prewarmed sandbox[id=%d] of %d/%d\n", sbMeta.id, i, size)
 		
 		if err = sb.Pause(); err != nil {
 			log.Printf("[lambda.go Prewarm()]sandbox pause failed\n")
 		}
-		
-		log.Printf("[lambda.go Prewarm()] sandbox[id=%d] paused\n", sbMeta.id)
 
-		log.Printf("step0: lPause len = %d\n", mgr.lPause.Len())
-		mgr.lPause.PushBack(sbMeta.id)
-		log.Printf("step1: lPause len = %d\n", mgr.lPause.Len())
-		
+		// TODO: 如何判断是加入 lActive 还是 lPause
 		//mgr.lActive.PushBack(sbMeta.id)
+		mgr.lPMutex.Lock()
+		mgr.lPause.PushBack(sbMeta.id)
+		mgr.lPMutex.Unlock()
+
+		log.Printf("[lambda.go Prewarm()] sandbox[%d](%d/%d) launched and paused, lPause: %d\n", sbMeta.id, i, size, mgr.lPause.Len())
 	}
 
 	return nil
@@ -309,8 +318,11 @@ func (mgr *LambdaMgr) PreWarmer() {
 						log.Printf("[lambda.go PreWarmer()] goroutine[%d] failed to launch a new sb: %v\n", i, err)
 						return
 					}
-					
+
+					// TODO: 如何判断是加入 lActive 还是 lPause
+					mgr.lAMutex.Lock()
 					mgr.lActive.PushBack(sbMeta.id)
+					mgr.lAMutex.Unlock()
 
 					t2 := time.Now()
 					log.Printf("[lamdba.go PreWarmer()] goroutine[%d] ended at %v ms; lActive: %d, with sb[%d] launched; consumed %d ms\n", 
@@ -829,6 +841,8 @@ func (linst *LambdaInstance) GetSB() (sbMeta *SbMeta, err error) {
 
 	// 搜索 lActive
 	if mgr.lActive.Len() > 0 {
+		mgr.lAMutex.Lock()
+
 		el := mgr.lActive.Front()
 		id := el.Value.(int)
 
@@ -836,8 +850,13 @@ func (linst *LambdaInstance) GetSB() (sbMeta *SbMeta, err error) {
 		//mgr.lRun.PushBack(id)
 
 		sbMeta = mgr.sbMap[id]
+
+		mgr.lAMutex.Unlock()
+
 		log.Printf("[lambda.go GetSB()] linst get a sb from lActive\n")
 	} else if mgr.lPause.Len() > 0 {
+		mgr.lPMutex.Lock()
+
 		el := mgr.lPause.Front()
 		id := el.Value.(int)
 
@@ -849,6 +868,9 @@ func (linst *LambdaInstance) GetSB() (sbMeta *SbMeta, err error) {
 			log.Printf("[lambda.go GetSB()] Unpause sb failed: %v\n", err)
 			return nil, err
 		}
+
+		mgr.lPMutex.Unlock()
+
 		log.Printf("[lambda.go GetSB()] linst get a sb from lPause and unpause it successfully\n")
 	} else {
 		if sbMeta, err = mgr.LaunchSB(); err != nil {
@@ -1027,14 +1049,14 @@ func (linst *LambdaInstance) Task() {
 			f.printf("discard sandbox %s due to Pause error: %v", sb.ID(), err)
 			sb = nil
 		}
-		log.Printf("[lambda.go linst.Task()] sandbox[%d] is paused\n", sbMeta.id)
 
-		//f.lmgr.lRun.Remove(f.lmgr.lRun.Back())
+		// TODO: 如何判断是加入 lActive 还是 lPause 
+		f.lmgr.lPMutex.Lock()
 		f.lmgr.lPause.PushBack(sbMeta.id)
+		f.lmgr.lPMutex.Unlock()
+
+		log.Printf("[lambda.go linst.Task()] sb[%d] paused and added to lPause: %d\n", sbMeta.id, f.lmgr.lPause.Len())
 		//sb = nil
-		log.Printf("[lambda.go linst.Task()] sandbox[%d] has been added to lPause, len = %d\n", sbMeta.id, f.lmgr.lPause.Len())
-		
-		//f.lmgr.lActive.PushBack(sbMeta.id)
 	}
 }
 
