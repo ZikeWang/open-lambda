@@ -350,3 +350,10 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 
 	return nil
 }
+
+func (pp *PackagePuller) Cleanup() {
+	if pp.sb != nil {
+		pp.sb.Destroy()
+		log.Printf("[packagepuller.go Cleanup()] sb destroyed\n")
+	}
+}

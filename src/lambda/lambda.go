@@ -344,6 +344,19 @@ func (mgr *LambdaMgr) KillPreWarmer() {
 	log.Printf("[lambda.go KillPreWarmer()] 'true' signal sent to mgr.killWarmChan\n")
 }
 
+// 销毁 sbMap 中管理的所有容器
+func (mgr *LambdaMgr) KillAllSb() {
+	mgr.sbMapMutex.Lock()
+	defer mgr.sbMapMutex.Unlock()
+
+	for id, sbMeta := range mgr.sbMap {
+		if sbMeta.sb != nil {
+			sbMeta.sb.Destroy()
+			log.Printf("[lambda.go KillAllSb()] sb[%d] been destroyed\n", id)
+		}
+	}
+}
+
 // Returns an existing instance (if there is one), or creates a new one
 func (mgr *LambdaMgr) Get(name string) (f *LambdaFunc) {
 	mgr.mapMutex.Lock()
@@ -389,6 +402,10 @@ func (mgr *LambdaMgr) Cleanup() {
 		f.Kill()
 	}
 
+	if mgr.PackagePuller != nil {
+		mgr.PackagePuller.Cleanup() // 清理 packagepuller 中创建的容器
+	}
+
 	if mgr.ImportCache != nil {
 		mgr.ImportCache.Cleanup()
 	}
@@ -409,6 +426,8 @@ func (mgr *LambdaMgr) Cleanup() {
 	if mgr.scratchDirs != nil {
 		mgr.scratchDirs.Cleanup()
 	}
+
+	mgr.KillAllSb() // 清理所有容器
 }
 
 func (f *LambdaFunc) Invoke(w http.ResponseWriter, r *http.Request) {
@@ -1031,7 +1050,7 @@ func (linst *LambdaInstance) Task() {
 			select {
 			case killed := <-linst.killChan:
 				log.Printf("[lambda.go linst.Task()] execute sb destroy\n")
-				sb.Destroy()
+				sb.Destroy() // TODO: 是否需要判断 sb != nil
 				killed <- true
 				return
 			default:
@@ -1056,7 +1075,8 @@ func (linst *LambdaInstance) Task() {
 		f.lmgr.lPMutex.Unlock()
 
 		log.Printf("[lambda.go linst.Task()] sb[%d] paused and added to lPause: %d\n", sbMeta.id, f.lmgr.lPause.Len())
-		//sb = nil
+		
+		sb = nil // 将 sb 从 linst 中释放
 	}
 }
 
