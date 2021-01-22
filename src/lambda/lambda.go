@@ -271,19 +271,16 @@ func (mgr *LambdaMgr) PreWarmer() {
 
 	LOOP: for {
 		select {
-		case <- mgr.killWarmChan: // a signal to break out of for-select infinite loop
-			log.Printf("[lambda.go PreWarmer()] receive killWarmChan signal, ready to break out of for-select loop\n")	
+		case <- mgr.killWarmChan: // a signal to break out of for-select infinite loop	
 			break LOOP // break 跳出 select 外层的 for 循环，如果不使用标签则只是跳出 select
 		case <- time.After(time.Millisecond * time.Duration(5000)): // loop per 50ms to adjust the pool
-			log.Printf("[lambda.go Prewarmer()] iteration began: lActive: %d\n", mgr.lActive.Len())	
-		
 			// 计算一个统计周期内可用容器数量的变化量，即：
 			// 上一周期结束时 lActive 长度 + 上一周期结束后 PreWarmer 创建的容器 - 本周期开始时 lActive 长度
 			// 若结果为正值则表示周期内可用容器数减少，说明需要在本轮补充容器
 			// 若结果为负值则表示周期内可用容器数增加，可能来源于 linst 使用完释放的容器，则本轮不需补充
 			deltaSB := lALen + incr - mgr.lActive.Len()
 			lALen = mgr.lActive.Len()
-			log.Printf("[lambda.go PreWarmer] decreased %d available sandboxes\n", deltaSB)
+			log.Printf("[lambda.go PreWarmer()] decreased %d available sandboxes; lActive: %d\n", deltaSB, mgr.lActive.Len())
 
 			if deltaSB > 0 {
 				incr = 1 // TODO: 如何确定需要增加的容器数
@@ -294,7 +291,6 @@ func (mgr *LambdaMgr) PreWarmer() {
 					incr = 0 // TODO: 何时考虑释放容器资源
 				}
 			}
-			log.Printf("[lambda.go PreWarmer()] ready to prewarm %d sandboxes\n", incr)
 			
 			// 如果要预热启动多个容器，则采用 goroutine 的方式并行执行容器创建
 			// 但 PreWarmer 内采用 “获取指标->决定增量->实施创建” 的串行逻辑
@@ -322,23 +318,22 @@ func (mgr *LambdaMgr) PreWarmer() {
 					mgr.lAMutex.Unlock()
 
 					t2 := time.Now()
-					log.Printf("[lamdba.go PreWarmer()] goroutine[%d] ended at %v ms; lActive: %d, with sb[%d] launched; consumed %d ms\n", 
+					log.Printf("[lamdba.go PreWarmer()] goroutine[%d] ended at %v ms; lActive: %d; launched sb[%d]; consumed %d ms\n", 
 									i, t2.UnixNano() / 1e6, mgr.lActive.Len(), sbMeta.id, int64(t2.Sub(t1)) / 1000000)
 				}(i, mgr, wg)
 			}
 			
 			wg.Wait()
-			log.Printf("[lambda.go PreWarmer()] iteration ended: lActive: %d, with %d sandboxes launched\n", mgr.lActive.Len(), incr)
+			log.Printf("[lambda.go PreWarmer()] launched %d new sandboxes; lActive: %d\n", incr, mgr.lActive.Len())
 		}
 	}
 
-	log.Printf("[lambda.go Prewarmer()] jumped out of for-select loop, PreWarmer terminated\n")
+	log.Printf("[lambda.go Prewarmer()] PreWarmer terminated\n")
 }
 
 // 通过 killWarmChan 通知 PreWarmer 结束 for-select 循环
 func (mgr *LambdaMgr) KillPreWarmer() {
 	mgr.killWarmChan <- true
-	log.Printf("[lambda.go KillPreWarmer()] 'true' signal sent to mgr.killWarmChan\n")
 }
 
 // 销毁 sbMap 中管理的所有容器
@@ -395,7 +390,7 @@ func (mgr *LambdaMgr) Cleanup() {
 	// 2. cleanup Zygote Sandboxes (after the handlers, which depend on the Zygotes)
 	// 3. cleanup SandboxPool underlying both of above
 	for _, f := range mgr.lfuncMap {
-		log.Printf("Kill function: %s", f.name)
+		//log.Printf("[lambda.go Cleanup()] kill lfunc[%s]", f.name)
 		f.Kill()
 	}
 
@@ -693,10 +688,10 @@ func (f *LambdaFunc) Task() {
 			handlerPath := filepath.Join(f.lmgr.codeDir, f.name) + ".py" // 这里不能把 f.name 放在 filepath.Join 里，否则就成了 /f.name/.py
 			if _, err := os.Stat(handlerPath); os.IsNotExist(err) {
 				srcPath := filepath.Join(common.Conf.Registry, f.name) + ".py"
-				log.Printf("[lambda.go lfunc.Task()] pull handler '%s.py', src: %s, dest: %s\n", f.name, srcPath, f.lmgr.codeDir)
+				log.Printf("[lambda.go lfunc.Task()] pull '%s.py', src: %s, dest: %s\n", f.name, srcPath, f.lmgr.codeDir)
 				cmd := exec.Command("cp", srcPath, f.lmgr.codeDir)
 				if err = cmd.Run(); err != nil {
-					log.Printf("[lambda.go lfunc.Task()] cp %s.py failed with err: %v\n", f.name, err)
+					log.Printf("[lambda.go lfunc.Task()] failed to pull %s.py : %v\n", f.name, err)
 					return
 				}
 			}
@@ -713,6 +708,7 @@ func (f *LambdaFunc) Task() {
 				log.Printf("[lambda.go lfunc.Task()] download pkgs failed with err: %v\n", err)
 				return
 			}
+			f.meta = meta
 
 			select {
 			case f.instChan <- req:
@@ -725,7 +721,7 @@ func (f *LambdaFunc) Task() {
 				req.done <- true
 			}
 		case req := <-f.doneChan:
-			log.Printf("[lambda.go lfunc.Task()] received doneChan signal\n")
+			log.Printf("[lambda.go lfunc.Task()] f.doneChan recv signal\n")
 			// msg: instance -> function
 
 			execMs.Add(req.execMs)
@@ -735,7 +731,7 @@ func (f *LambdaFunc) Task() {
 			req.done <- true
 
 		case done := <-f.killChan:
-			log.Printf("[lambda.go lfunc.Task()] received killChan signal\n")
+			log.Printf("[lambda.go lfunc.Task()] f.killChan recv signal\n")
 			// signal all instances to die, then wait for
 			// cleanup task to finish and exit
 			el := f.instances.Front()
@@ -761,7 +757,7 @@ func (f *LambdaFunc) Task() {
 		inProgressWorkMs := outstandingReqs * execMs.Avg
 		desiredInstances := inProgressWorkMs / 1000
 
-		log.Printf("[lambda.go lfunc.Task()] outstandingReqs = %d, desiredInstances = %d\n", outstandingReqs, desiredInstances)
+		//log.Printf("[lambda.go lfunc.Task()] outstandingReqs = %d, desiredInstances = %d\n", outstandingReqs, desiredInstances)
 
 		// if we have, say, one job that will take 100
 		// seconds, spinning up 100 instances won't do any
@@ -784,9 +780,9 @@ func (f *LambdaFunc) Task() {
 		if lastScaling != nil {
 			elapsed := now.Sub(*lastScaling)
 			if elapsed < adjustFreq {
-				log.Printf("[lambda.go lfunc.Task()] elapsed time < 1s\n")
+				//log.Printf("[lambda.go lfunc.Task()] elapsed time < 1s\n")
 				if desiredInstances != f.instances.Len() {
-					log.Printf("[lambda.go lfunc.Task()] adjust new timeout interval\n")
+					//log.Printf("[lambda.go lfunc.Task()] adjust new timeout interval\n")
 					timeout = time.NewTimer(adjustFreq - elapsed)
 				}
 				continue
@@ -800,7 +796,7 @@ func (f *LambdaFunc) Task() {
 			f.newInstance()
 			lastScaling = &now
 		} else if f.instances.Len() > desiredInstances {
-			log.Printf("[lambda.go lfunc.Task()] execute LambdaInstance AsyncKill\n")
+			//log.Printf("[lambda.go lfunc.Task()] execute LambdaInstance AsyncKill\n")
 			f.printf("reduce instances to %d", f.instances.Len()-1)
 			waitChan := f.instances.Back().Value.(*LambdaInstance).AsyncKill()
 			f.instances.Remove(f.instances.Back())
@@ -809,7 +805,7 @@ func (f *LambdaFunc) Task() {
 		}
 
 		if f.instances.Len() != desiredInstances {
-			log.Printf("[lambda.go lfunc.Task()] current instances numbers[%d] != desired numbers[%d]\n", f.instances.Len(), desiredInstances)
+			//log.Printf("[lambda.go lfunc.Task()] current instances numbers[%d] != desired numbers[%d]\n", f.instances.Len(), desiredInstances)
 			// we can only adjust quickly, so we want to
 			// run through this loop again as soon as
 			// possible, even if there are no requests to
@@ -848,7 +844,7 @@ func (f *LambdaFunc) Kill() {
 // 1. 从 lActive 中寻找
 // 2. 当 lActive 为空时，从 lPause 中寻找
 // 3. 当 lActive 和 lPause 中均为空时冷启动
-func (mgr *LambdaMgr) GetSB() (sbMeta *SbMeta, err error) {
+func (mgr *LambdaMgr) GetSB(name string) (sbMeta *SbMeta, err error) {
 	// 搜索 lActive
 	if mgr.lActive.Len() > 0 {
 		mgr.lAMutex.Lock()
@@ -863,7 +859,7 @@ func (mgr *LambdaMgr) GetSB() (sbMeta *SbMeta, err error) {
 
 		mgr.lAMutex.Unlock()
 
-		log.Printf("[lambda.go GetSB()] get a sb from lActive\n")
+		log.Printf("[lambda.go GetSB()] %s get sb[%d] from lActive\n", name, id)
 	} else if mgr.lPause.Len() > 0 {
 		mgr.lPMutex.Lock()
 
@@ -881,14 +877,14 @@ func (mgr *LambdaMgr) GetSB() (sbMeta *SbMeta, err error) {
 
 		mgr.lPMutex.Unlock()
 
-		log.Printf("[lambda.go GetSB()] get a sb from lPause and unpause it successfully\n")
+		log.Printf("[lambda.go GetSB()] %s get sb[%d] from lPause\n", name, id)
 	} else {
 		if sbMeta, err = mgr.LaunchSB(); err != nil {
 			log.Printf("[lambda.go GetSB()] failed to cold start a new sb: %v", err)
 			return nil, err
 		}
 
-		log.Printf("[lambda.go GetSB()] get a new sb by cold start\n")
+		log.Printf("[lambda.go GetSB()] %s get new sb[%d] by LaunchSB()\n", name, sbMeta.id)
 	}
 
 	return sbMeta, nil
@@ -906,7 +902,7 @@ func (mgr *LambdaMgr) RecycleSB(sbMeta *SbMeta) {
 	mgr.lPause.PushBack(sbMeta.id)
 	mgr.lPMutex.Unlock()
 
-	log.Printf("[lambda.go RecycleSB()] sb[%d] paused and added to lPause: %d\n", sbMeta.id, mgr.lPause.Len())
+	log.Printf("[lambda.go RecycleSB()] paused sb[%d] and add to lPause: %d\n", sbMeta.id, mgr.lPause.Len())
 }
 
 // this Task manages a single Sandbox (at any given time), and
@@ -932,7 +928,7 @@ func (linst *LambdaInstance) Task() {
 		select {
 		case req = <-f.instChan:
 		case killed := <-linst.killChan:
-			log.Printf("[lambda.go 620] LambdaInstance killChan actived and destroy sb\n")
+			log.Printf("[lambda.go linst.Task()] linst.killChan recv signal\n")
 			if sb != nil {
 				sb.Destroy()
 			}
@@ -1006,14 +1002,14 @@ func (linst *LambdaInstance) Task() {
 	}
 	*/
 
-		sbMeta, err := f.lmgr.GetSB()
+		sbMeta, err := f.lmgr.GetSB("lfunc-" + f.name)
 		if err != nil {
 			log.Printf("[lambda.go linst.Task()] failed to get a sb: %v\n", err)
 			return
 		}
 
 		sb = sbMeta.sb
-		log.Printf("[lambda.go linst.Task()] lfunc[%s] instance get sb[%d]\n", f.name, sbMeta.id)
+		//log.Printf("[lambda.go linst.Task()] lfunc[%s] instance get sb[%d]\n", f.name, sbMeta.id)
 
 		proxy, err = sb.HttpProxy()
 		if err != nil {
@@ -1037,25 +1033,25 @@ func (linst *LambdaInstance) Task() {
 		if _, err = pipe.Write(fname); err != nil {
 			log.Printf("[lambda.go linst.Task()] failed to write filename[%s] to server_pipe\n", f.name)
 		}
-		log.Printf("[lambda.go linst.Task()] filename[%s] has been written to server_pipe\n", f.name)
+		//log.Printf("[lambda.go linst.Task()] filename[%s] has been written to server_pipe\n", f.name)
 
 		// below here, we're guaranteed (1) sb != nil, (2) proxy != nil, (3) sb is unpaused
 
 		// serve until we incoming queue is empty
 		for req != nil {
-			log.Printf("[lambda.go linst.Task()] begin to serve HTTP request\n")
+			//log.Printf("[lambda.go linst.Task()] begin to serve HTTP request\n")
 			// ask Sandbox to respond, via HTTP proxy
 			tHTTP := common.T0("ServeHTTP")
 			proxy.ServeHTTP(req.w, req.r)
 			tHTTP.T1()
-			log.Printf("[lambda.go linst.Task()] ServeHTTP consume %d milliseconds\n", tHTTP.Milliseconds)
+			//log.Printf("[lambda.go linst.Task()] ServeHTTP consume %d milliseconds\n", tHTTP.Milliseconds)
 			req.execMs = int(tHTTP.Milliseconds)
 			f.doneChan <- req
 
 			// check whether we should shutdown (non-blocking)
 			select {
 			case killed := <-linst.killChan:
-				log.Printf("[lambda.go linst.Task()] execute sb destroy\n")
+				log.Printf("[lambda.go linst.Task()] linst.killChan recv signal\n")
 				sb.Destroy() // TODO: 是否需要判断 sb != nil
 				killed <- true
 				return

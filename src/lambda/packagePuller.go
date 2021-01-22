@@ -253,12 +253,12 @@ func (pp *PackagePuller) GetPkg(pkg string) (*Package, error) {
 
 	// fast path
 	if atomic.LoadUint32(&p.installed) == 1 { // 原子访问，从 &p.installed 的内存地址处读值，判断该值是否等于 1，即是否已经 installed
-		log.Printf("[packagePuller.go GetPkg()] fast path\n")
+		log.Printf("[packagePuller.go GetPkg()] pkg[%s] already installed\n", p.name)
 		return p, nil
 	}
 
 	// slow path
-	log.Printf("[packagePuller.go GetPkg()] slow path\n")
+	log.Printf("[packagePuller.go GetPkg()] pkg[%s] ready to install\n", p.name)
 	p.installMutex.Lock()
 	defer p.installMutex.Unlock()
 	if p.installed == 0 {
@@ -278,9 +278,6 @@ func (pp *PackagePuller) GetPkg(pkg string) (*Package, error) {
 // the host.  We want the package on the host to share with all, but
 // want to run the install in the Sandbox because we don't trust it.
 func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
-	t := common.T0("pull-package")
-	defer t.T1()
-
 	// the pip-install lambda installs to /host, which is the the
 	// same as scratchDir, which is the same as a sub-directory
 	// named after the package in the packages dir
@@ -293,16 +290,14 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 		// assume dir exististence means it is installed already
 		// 如果 Pkg 的目录存在，那么其至少安装过一次(包括该 Pkg 依赖的其他 Pkgs)，直接返回
 		// 跳过后续创建容器并传入 alreadyInstalled = true 这一部分冗余逻辑
-		log.Printf("[packagePuller.go sandboxInstall()] [%s] appears already installed from previous run of OL", p.name)
+		log.Printf("[packagePuller.go sandboxInstall()] pkg[%s] appears already installed from previous run of OL", p.name)
 		alreadyInstalled = true
 		return nil
 	} else {
 		// 如果不存在则创建相应的 scratchDir 目录
 		if err := os.Mkdir(scratchDir, 0700); err != nil {
-			log.Printf("failed\n")
 			return err
 		}
-		log.Printf("successful\n")
 	}
 
 	defer func() {
@@ -312,7 +307,7 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	}()
 
 	//sb := pp.sb
-	sbMeta, err := pp.lmgr.GetSB()
+	sbMeta, err := pp.lmgr.GetSB("pkg-" + p.name)
 	if err != nil {
 		log.Printf("[packagePuller.go sandboxInstall()] failed to get a sb: %v\n", err)
 		return
@@ -320,7 +315,7 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	defer pp.lmgr.RecycleSB(sbMeta)
 
 	sb := sbMeta.sb
-	log.Printf("[packagePuller.go sandboxInstall()] get sb[%d]\n", sbMeta.id)
+	//log.Printf("[packagePuller.go sandboxInstall()] get sb[%d]\n", sbMeta.id)
 
 	proxy, err := sb.HttpProxy()
 	if err != nil {
@@ -339,23 +334,24 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	if _, err = pipe.Write(fname); err != nil {
 		log.Printf("[packagePuller.go sandboxInstall()] failed to write filename to server_pipe\n")
 	}
-	log.Printf("[packagePuller.go sandboxInstall()] filename has been written to server_pipe\n")
 
 	// we still need to run a Sandbox to parse the dependencies, even if it is already installed
 	msg := fmt.Sprintf(`{"pkg": "%s", "alreadyInstalled": %v}`, p.name, alreadyInstalled)
 	reqBody := bytes.NewReader([]byte(msg))
 	// the URL doesn't matter, since it is local anyway
-	fmt.Printf("pkg[%s] sent: %v\n", p.name, time.Now().UnixNano() / 1e6)
 	req, err := http.NewRequest("POST", "http://container/run/pip-install", reqBody)
 	if err != nil {
 		return err
 	}
+	log.Printf("[packagePuller.go sandboxInstall()] pkg[%s] install request sent at %v\n", p.name, time.Now().UnixNano() / 1e6)
+
 	resp, err := proxy.Transport.RoundTrip(req)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("pkg[%s] received: %v\n", p.name, time.Now().UnixNano() / 1e6)
 	defer resp.Body.Close()
+	log.Printf("[packagePuller.go sandboxInstall()] pkg[%s] install response recv at %v\n", p.name, time.Now().UnixNano() / 1e6)
+
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return err
@@ -376,7 +372,7 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 		return err
 	}
 
-	log.Printf("[packagePuller.go sandboxInstall()] pkg[%s] install result [Deps] [TopLevel]: '%s'", p.name, p.meta)
+	//log.Printf("[packagePuller.go sandboxInstall()] pkg[%s] install result:< [Deps] [TopLevel]: '%s' >", p.name, p.meta)
 
 	for i, pkg := range p.meta.Deps {
 		p.meta.Deps[i] = normalizePkg(pkg)

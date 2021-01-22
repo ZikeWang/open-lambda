@@ -66,7 +66,7 @@ func (sb *safeSandbox) event(evType SandboxEventType) {
 // assumes lock is already held
 func (sb *safeSandbox) destroyOnErr(origErr error) {
 	if origErr != nil {
-		sb.printf("Destroy() due to %v", origErr)
+		//sb.printf("Destroy() due to %v", origErr)
 		sb.Sandbox.Destroy()
 		sb.dead = true
 
@@ -76,7 +76,7 @@ func (sb *safeSandbox) destroyOnErr(origErr error) {
 }
 
 func (sb *safeSandbox) Destroy() {
-	sb.printf("Destroy()")
+	//sb.printf("Destroy()")
 	t := common.T0("Destroy()")
 	defer t.T1()
 	sb.Mutex.Lock()
@@ -94,7 +94,7 @@ func (sb *safeSandbox) Destroy() {
 }
 
 func (sb *safeSandbox) Pause() (err error) {
-	sb.printf("Pause()")
+	//sb.printf("Pause()")
 	t := common.T0("Pause()")
 	defer t.T1()
 	sb.Mutex.Lock()
@@ -117,7 +117,7 @@ func (sb *safeSandbox) Pause() (err error) {
 }
 
 func (sb *safeSandbox) Unpause() (err error) {
-	sb.printf("Unpause()")
+	//sb.printf("Unpause()")
 	t := common.T0("Unpause()")
 	defer t.T1()
 	sb.Mutex.Lock()
@@ -140,7 +140,7 @@ func (sb *safeSandbox) Unpause() (err error) {
 }
 
 func (sb *safeSandbox) HttpProxy() (p *httputil.ReverseProxy, err error) {
-	sb.printf("Channel()")
+	//sb.printf("Channel()")
 	t := common.T0("Channel()")
 	defer t.T1()
 	sb.Mutex.Lock()

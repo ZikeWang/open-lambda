@@ -12,7 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"log"
+	//"log"
 
 	"github.com/open-lambda/open-lambda/ol/common"
 )
@@ -84,7 +84,7 @@ func (cp *HandlerPuller) Pull(name string) (targetDir string, err error) {
 
 		for i := 0; i < len(paths); i++ {
 			if _, err := os.Stat(paths[i]); !os.IsNotExist(err) { // paths[i] 对应路径的文件存在则执行 if 分支
-				log.Printf("[handlerPuller.go 86] paths[%d] '%s' exists and ready to pull from there\n", i, paths[i])
+				//log.Printf("[handlerPuller.go 86] paths[%d] '%s' exists and ready to pull from there\n", i, paths[i])
 				targetDir, err = cp.pullLocalFile(paths[i], name) // 传入完整路径和文件名
 				return targetDir, err
 			}
@@ -100,7 +100,7 @@ func (cp *HandlerPuller) Reset(name string) {
 }
 
 func (cp *HandlerPuller) pullLocalFile(src, lambdaName string) (targetDir string, err error) {
-	log.Printf("[handlerPuller.go 102] pullLocalFile src path is '%s'\n", src)
+	//log.Printf("[handlerPuller.go 102] pullLocalFile src path is '%s'\n", src)
 	stat, err := os.Stat(src) // Stat returns type FileInfo
 	if err != nil {
 		return "", err
