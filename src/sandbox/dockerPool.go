@@ -72,7 +72,7 @@ func (pool *DockerPool) Create(parent Sandbox, isLeaf bool, codeDir, scratchDir 
 
 	volumes := []string{
 		fmt.Sprintf("%s:%s", scratchDir, "/host"),
-		fmt.Sprintf("%s:%s:ro", pool.pkgsDir, "/packages"),
+		fmt.Sprintf("%s:%s", pool.pkgsDir, "/packages"),
 	}
 
 	if codeDir != "" {

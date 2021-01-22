@@ -158,7 +158,7 @@ func NewLambdaMgr() (res *LambdaMgr, err error) {
 	}
 
 	log.Printf("Create PackagePuller")
-	mgr.PackagePuller, err = NewPackagePuller(mgr.sbPool, mgr.DepTracer)
+	mgr.PackagePuller, err = NewPackagePuller(mgr, mgr.sbPool, mgr.DepTracer)
 	if err != nil {
 		return nil, err
 	}
@@ -286,14 +286,11 @@ func (mgr *LambdaMgr) PreWarmer() {
 			log.Printf("[lambda.go PreWarmer] decreased %d available sandboxes\n", deltaSB)
 
 			if deltaSB > 0 {
-				log.Printf("1\n")
 				incr = 1 // TODO: 如何确定需要增加的容器数
 			} else {
 				if mgr.lActive.Len() == 0 {
 					incr = staticIncr
-					log.Printf("2\n")
 				} else {
-					log.Printf("3\n")
 					incr = 0 // TODO: 何时考虑释放容器资源
 				}
 			}
@@ -400,10 +397,6 @@ func (mgr *LambdaMgr) Cleanup() {
 	for _, f := range mgr.lfuncMap {
 		log.Printf("Kill function: %s", f.name)
 		f.Kill()
-	}
-
-	if mgr.PackagePuller != nil {
-		mgr.PackagePuller.Cleanup() // 清理 packagepuller 中创建的容器
 	}
 
 	if mgr.ImportCache != nil {
@@ -855,9 +848,7 @@ func (f *LambdaFunc) Kill() {
 // 1. 从 lActive 中寻找
 // 2. 当 lActive 为空时，从 lPause 中寻找
 // 3. 当 lActive 和 lPause 中均为空时冷启动
-func (linst *LambdaInstance) GetSB() (sbMeta *SbMeta, err error) {
-	mgr := linst.lfunc.lmgr
-
+func (mgr *LambdaMgr) GetSB() (sbMeta *SbMeta, err error) {
 	// 搜索 lActive
 	if mgr.lActive.Len() > 0 {
 		mgr.lAMutex.Lock()
@@ -872,7 +863,7 @@ func (linst *LambdaInstance) GetSB() (sbMeta *SbMeta, err error) {
 
 		mgr.lAMutex.Unlock()
 
-		log.Printf("[lambda.go GetSB()] linst get a sb from lActive\n")
+		log.Printf("[lambda.go GetSB()] get a sb from lActive\n")
 	} else if mgr.lPause.Len() > 0 {
 		mgr.lPMutex.Lock()
 
@@ -890,17 +881,32 @@ func (linst *LambdaInstance) GetSB() (sbMeta *SbMeta, err error) {
 
 		mgr.lPMutex.Unlock()
 
-		log.Printf("[lambda.go GetSB()] linst get a sb from lPause and unpause it successfully\n")
+		log.Printf("[lambda.go GetSB()] get a sb from lPause and unpause it successfully\n")
 	} else {
 		if sbMeta, err = mgr.LaunchSB(); err != nil {
 			log.Printf("[lambda.go GetSB()] failed to cold start a new sb: %v", err)
 			return nil, err
 		}
 
-		log.Printf("[lambda.go GetSB()] linst get a new sb by cold start\n")
+		log.Printf("[lambda.go GetSB()] get a new sb by cold start\n")
 	}
 
 	return sbMeta, nil
+}
+
+func (mgr *LambdaMgr) RecycleSB(sbMeta *SbMeta) {
+	// TODO: 如何判断是加入 lActive 还是 lPause
+
+	if err := sbMeta.sb.Pause(); err != nil {
+		log.Printf("[lambda.go RecycleSB()] failed to pause for: %v\n", err)
+		// TODO: return err? or do something
+	}
+
+	mgr.lPMutex.Lock()
+	mgr.lPause.PushBack(sbMeta.id)
+	mgr.lPMutex.Unlock()
+
+	log.Printf("[lambda.go RecycleSB()] sb[%d] paused and added to lPause: %d\n", sbMeta.id, mgr.lPause.Len())
 }
 
 // this Task manages a single Sandbox (at any given time), and
@@ -915,11 +921,9 @@ func (linst *LambdaInstance) GetSB() (sbMeta *SbMeta, err error) {
 func (linst *LambdaInstance) Task() {
 	f := linst.lfunc
 
-	var sbMeta *SbMeta = nil
 	var sb sandbox.Sandbox = nil
 	//var client *http.Client = nil // whenever we create a Sandbox, we init this too
 	var proxy *httputil.ReverseProxy = nil // whenever we create a Sandbox, we init this too
-	var err error
 
 	for {
 		// wait for a request (blocking) before making the
@@ -1002,10 +1006,12 @@ func (linst *LambdaInstance) Task() {
 	}
 	*/
 
-		if sbMeta, err = linst.GetSB(); err != nil {
+		sbMeta, err := f.lmgr.GetSB()
+		if err != nil {
 			log.Printf("[lambda.go linst.Task()] failed to get a sb: %v\n", err)
 			return
 		}
+
 		sb = sbMeta.sb
 		log.Printf("[lambda.go linst.Task()] lfunc[%s] instance get sb[%d]\n", f.name, sbMeta.id)
 
@@ -1064,18 +1070,7 @@ func (linst *LambdaInstance) Task() {
 			}
 		}
 
-		if err := sb.Pause(); err != nil {
-			f.printf("discard sandbox %s due to Pause error: %v", sb.ID(), err)
-			sb = nil
-		}
-
-		// TODO: 如何判断是加入 lActive 还是 lPause 
-		f.lmgr.lPMutex.Lock()
-		f.lmgr.lPause.PushBack(sbMeta.id)
-		f.lmgr.lPMutex.Unlock()
-
-		log.Printf("[lambda.go linst.Task()] sb[%d] paused and added to lPause: %d\n", sbMeta.id, f.lmgr.lPause.Len())
-		
+		f.lmgr.RecycleSB(sbMeta)
 		sb = nil // 将 sb 从 linst 中释放
 	}
 }

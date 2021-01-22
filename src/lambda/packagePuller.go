@@ -93,7 +93,7 @@ def deps(dirname):
 def f(event):
     pkg = event["pkg"]
     alreadyInstalled = event["alreadyInstalled"]
-    path = "/host/" + pkg + "/files"
+    path = "/packages/" + pkg + "/files"
     if not alreadyInstalled:
         rc = os.system('pip3 install --no-deps %s -t %s' % (pkg, path))
         print('pip install returned code %d' % rc)
@@ -109,15 +109,16 @@ def f(event):
  * The manager installs to the worker host from an optional pip mirror.
  */
 type PackagePuller struct {
+	lmgr      *LambdaMgr
 	sbPool    sandbox.SandboxPool
 	depTracer *DepTracer
 
 	// directory of lambda code that installs pip packages
-	pipLambda string
+	//pipLambda string
 
 	packages  sync.Map
 
-	sb        sandbox.Sandbox // 容器实际对象
+	//sb        sandbox.Sandbox // 容器实际对象
 }
 
 type Package struct {
@@ -133,23 +134,28 @@ type PackageMeta struct {
 	TopLevel []string `json:"TopLevel"`
 }
 // 创建 open-lambda/test-dir/worker/admin-lambda/pip-install/f.py 并写入上面 installLambda 的内容
-func NewPackagePuller(sbPool sandbox.SandboxPool, depTracer *DepTracer) (*PackagePuller, error) {
+func NewPackagePuller(lmgr *LambdaMgr, sbPool sandbox.SandboxPool, depTracer *DepTracer) (*PackagePuller, error) {
 	// create a lambda function for installing pip packages.  We do
 	// each install in a Sandbox for two reasons:
 	//
 	// 1. packages may be malicious
 	// 2. we want to install the right version, matching the Python
 	//    in the Sandbox
+	/*
 	pipLambda := filepath.Join(common.Conf.Worker_dir, "admin-lambdas", "pip-install") // 创建目录 open-lambda/test-dir/worker/admin-lambdas/pip-install
 	if err := os.MkdirAll(pipLambda, 0700); err != nil {
 		return nil, err
 	}
+	
 	path := filepath.Join(pipLambda, "installLambda.py") // 创建文件 open-lambda/test-dir/worker/admin-lambdas/pip-install/f.py
+	*/
+	path := filepath.Join(lmgr.codeDir, "installLambda.py")
 	code := []byte(installLambda)
 	if err := ioutil.WriteFile(path, code, 0600); err != nil {
 		return nil, err
 	}
 
+	/*
 	// 创建容器
 	meta := &sandbox.SandboxMeta{
 		MemLimitMB: common.Conf.Limits.Installer_mem_mb,
@@ -161,12 +167,14 @@ func NewPackagePuller(sbPool sandbox.SandboxPool, depTracer *DepTracer) (*Packag
 		log.Printf("[packagePuller.go NewPackagePuller()] Failed to create sandbox with err: %s\n", err)
 		return nil, err
 	}
+	*/
 
 	installer := &PackagePuller{
+		lmgr:      lmgr,
 		sbPool:    sbPool,
 		depTracer: depTracer,
-		pipLambda: pipLambda,
-		sb:        sb,
+		//pipLambda: pipLambda,
+		//sb:        sb,
 	}
 
 	return installer, nil
@@ -291,8 +299,10 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	} else {
 		// 如果不存在则创建相应的 scratchDir 目录
 		if err := os.Mkdir(scratchDir, 0700); err != nil {
+			log.Printf("failed\n")
 			return err
 		}
+		log.Printf("successful\n")
 	}
 
 	defer func() {
@@ -301,11 +311,35 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 		}
 	}()
 
-	sb := pp.sb
+	//sb := pp.sb
+	sbMeta, err := pp.lmgr.GetSB()
+	if err != nil {
+		log.Printf("[packagePuller.go sandboxInstall()] failed to get a sb: %v\n", err)
+		return
+	}
+	defer pp.lmgr.RecycleSB(sbMeta)
+
+	sb := sbMeta.sb
+	log.Printf("[packagePuller.go sandboxInstall()] get sb[%d]\n", sbMeta.id)
+
 	proxy, err := sb.HttpProxy()
 	if err != nil {
 		return nil
 	}
+
+	pipeFile := filepath.Join(sbMeta.scratchDir, "server_pipe")
+	pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
+	if err != nil {
+		log.Printf("[packagePuller.go sandboxInstall()] cannot open server_pipe: %v\n", err)
+		return
+	}
+	defer pipe.Close()
+	
+	fname := []byte("installLambda") // LambdaFunc.name 保存了请求名(/run/请求名)
+	if _, err = pipe.Write(fname); err != nil {
+		log.Printf("[packagePuller.go sandboxInstall()] failed to write filename to server_pipe\n")
+	}
+	log.Printf("[packagePuller.go sandboxInstall()] filename has been written to server_pipe\n")
 
 	// we still need to run a Sandbox to parse the dependencies, even if it is already installed
 	msg := fmt.Sprintf(`{"pkg": "%s", "alreadyInstalled": %v}`, p.name, alreadyInstalled)
@@ -349,11 +383,4 @@ func (pp *PackagePuller) sandboxInstall(p *Package) (err error) {
 	}
 
 	return nil
-}
-
-func (pp *PackagePuller) Cleanup() {
-	if pp.sb != nil {
-		pp.sb.Destroy()
-		log.Printf("[packagepuller.go Cleanup()] sb destroyed\n")
-	}
 }
