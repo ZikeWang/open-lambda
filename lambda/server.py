@@ -67,7 +67,7 @@ class SockFileHandler(tornado.web.RequestHandler):
             flog = open(LOG_PATH, "a")
 
             # 函数调用计时起点
-            tm1 = time.time()
+            tm1 = time.time() # 返回浮点秒数，小数点前精确到秒，小数点后第三位精确到毫秒
             stm = str(exec_cnt) + ' : ' + modname + ' : call start : ' + str(tm1) + '\n'
 
             self.write(json.dumps(ff.f(event)))
