@@ -265,7 +265,7 @@ func (mgr *LambdaMgr) Prewarm(size int) (err error) {
 
 func (mgr *LambdaMgr) PreWarmer() {
 	var lALen int = mgr.lActive.Len() // lActive 的原始长度/上一轮 for-select 循环结束时的长度
-	var staticIncr int = 2 // 固定预留容器数量，即当 lActive = 0 且没有请求时，也要预留以备用的数量
+	var staticIncr int = 5 // 固定预留容器数量，即当 lActive = 0 且没有请求时，也要预留以备用的数量
 	// var dynamicIncr int = 0
 	var incr int = 0 // 实际新增的容器数量
 
@@ -645,6 +645,7 @@ func (f *LambdaFunc) Task() {
 				continue
 			}
 		case req := <-f.funcChan:
+			log.Printf("[lambda.go lfunc.Task()] f.funcChan recv signal\n")
 			// msg: client -> function
 
 			// check for new code, and cleanup old code
@@ -927,6 +928,7 @@ func (linst *LambdaInstance) Task() {
 		var req *Invocation
 		select {
 		case req = <-f.instChan:
+			log.Printf("[lambda.go linst.Task()] outer f.instChan recv signal\n")
 		case killed := <-linst.killChan:
 			log.Printf("[lambda.go linst.Task()] linst.killChan recv signal\n")
 			if sb != nil {
@@ -1009,7 +1011,7 @@ func (linst *LambdaInstance) Task() {
 		}
 
 		sb = sbMeta.sb
-		//log.Printf("[lambda.go linst.Task()] lfunc[%s] instance get sb[%d]\n", f.name, sbMeta.id)
+		log.Printf("[lambda.go linst.Task()] lfunc[%s] instance get sb[%d]\n", f.name, sbMeta.id)
 
 		proxy, err = sb.HttpProxy()
 		if err != nil {
@@ -1021,30 +1023,30 @@ func (linst *LambdaInstance) Task() {
 			continue // wait for another request before retrying
 		}
 
-		pipeFile := filepath.Join(sbMeta.scratchDir, "server_pipe")
-		pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
-		if err != nil {
-			log.Printf("[lambda.go linst.Task()] cannot open server_pipe: %v\n", err)
-			return
-		}
-		defer pipe.Close()
-		
-		fname := []byte(f.name) // LambdaFunc.name 保存了请求名(/run/请求名)
-		if _, err = pipe.Write(fname); err != nil {
-			log.Printf("[lambda.go linst.Task()] failed to write filename[%s] to server_pipe\n", f.name)
-		}
-		//log.Printf("[lambda.go linst.Task()] filename[%s] has been written to server_pipe\n", f.name)
-
 		// below here, we're guaranteed (1) sb != nil, (2) proxy != nil, (3) sb is unpaused
 
 		// serve until we incoming queue is empty
 		for req != nil {
+			pipeFile := filepath.Join(sbMeta.scratchDir, "server_pipe")
+			pipe, err := os.OpenFile(pipeFile, os.O_RDWR, 0777) // 以读写模式打开命名管道文件
+			if err != nil {
+				log.Printf("[lambda.go linst.Task()] cannot open server_pipe: %v\n", err)
+				return
+			}
+			defer pipe.Close()
+			
+			fname := []byte(f.name) // LambdaFunc.name 保存了请求名(/run/请求名)
+			if _, err = pipe.Write(fname); err != nil {
+				log.Printf("[lambda.go linst.Task()] failed to write filename[%s] to server_pipe\n", f.name)
+			}
+			log.Printf("[lambda.go linst.Task()] filename[%s] has been written to server_pipe\n", f.name)
+
 			//log.Printf("[lambda.go linst.Task()] begin to serve HTTP request\n")
 			// ask Sandbox to respond, via HTTP proxy
 			tHTTP := common.T0("ServeHTTP")
 			proxy.ServeHTTP(req.w, req.r)
 			tHTTP.T1()
-			//log.Printf("[lambda.go linst.Task()] ServeHTTP consume %d milliseconds\n", tHTTP.Milliseconds)
+			log.Printf("[lambda.go linst.Task()] ServeHTTP consume %d milliseconds\n", tHTTP.Milliseconds)
 			req.execMs = int(tHTTP.Milliseconds)
 			f.doneChan <- req
 
@@ -1061,6 +1063,7 @@ func (linst *LambdaInstance) Task() {
 			// grab another request (non-blocking)
 			select {
 			case req = <-f.instChan:
+				log.Printf("[lambda.go linst.Task()] inner f.instChan recv signal\n")
 			default:
 				req = nil
 			}

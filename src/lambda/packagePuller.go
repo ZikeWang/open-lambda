@@ -279,12 +279,12 @@ func (pp *PackagePuller) GetPkg(pkg string) (*Package, error) {
 
 	// fast path
 	if atomic.LoadUint32(&p.installed) == 1 { // 原子访问，从 &p.installed 的内存地址处读值，判断该值是否等于 1，即是否已经 installed
-		log.Printf("[packagePuller.go GetPkg()] pkg[%s] already installed\n", p.name)
+		log.Printf("[packagePuller.go GetPkg()] fast path: pkg[%s] already installed\n", p.name)
 		return p, nil
 	}
 
 	// slow path
-	log.Printf("[packagePuller.go GetPkg()] pkg[%s] ready to install\n", p.name)
+	log.Printf("[packagePuller.go GetPkg()] slow path: pkg[%s] ready to install\n", p.name)
 	p.installMutex.Lock()
 	defer p.installMutex.Unlock()
 	if p.installed == 0 {
