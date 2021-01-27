@@ -207,33 +207,59 @@ func (pp *PackagePuller) InstallRecursive(installs []string) ([]string, error) {
 		installSet[name] = true
 	}
 
-	// Installs may grow as we loop, because some installs have
-	// deps, leading to other installs
-	for i := 0; i < len(installs); i++ {
-		pkg := installs[i]
-		if common.Conf.Trace.Package {
-			log.Printf("[packagePuller.go InstallRecursive()] On '%v' of '%v'", pkg, installs)
-		}
-		p, err := pp.GetPkg(pkg)
-		if err != nil {
-			return nil, err
-		}
-		/*
-		if common.Conf.Trace.Package {
-			log.Printf("Package '%s' has deps %v", pkg, p.meta.Deps)
-			log.Printf("Package '%s' has top-level modules %v", pkg, p.meta.TopLevel)
-		}
-		*/
+	var insMutex sync.Mutex
+	var wg sync.WaitGroup
+	installsLen, currentLen := 0, 0
 
-		log.Printf("[packagePuller.go InstallRecursive()] Pkg[%s] has Deps: %v; TopLevel: %v\n", pkg, p.meta.Deps, p.meta.TopLevel)
-
-		// push any previously unseen deps on the list of ones to install
-		for _, dep := range p.meta.Deps {
-			if !installSet[dep] {
-				installs = append(installs, dep)
-				installSet[dep] = true
-			}
+	for {
+		currentLen = installsLen
+		installsLen = len(installs)
+		log.Printf("[packagePuller.go InstallRecursive] installs-slice (old)currentLen = %d, (new)installLen = %d\n", currentLen, installsLen)
+		if currentLen == installsLen {
+			break
 		}
+
+		// Installs may grow as we loop, because some installs have
+		// deps, leading to other installs
+		for i := currentLen; i < installsLen; i++ {
+			wg.Add(1)
+			go func(wg *sync.WaitGroup, insMutex *sync.Mutex, i int, installs *[]string, installSet *map[string]bool, pp *PackagePuller) {
+				defer wg.Done()
+
+				pkg := (*installs)[i]
+				log.Printf("[packagePuller.go InstallRecursive()] goroutine[%d] begins GetPkg[%s] at %v\n", i, pkg, time.Now().UnixNano() / 1e6)
+				/*
+				if common.Conf.Trace.Package {
+					log.Printf("[packagePuller.go InstallRecursive()] On '%v' of '%v'", pkg, installs)
+				}
+				*/
+				p, err := pp.GetPkg(pkg)
+				if err != nil {
+					//return nil, err
+					log.Printf("[packagePuller.go InstallRecursive()] GetPkg[%s] failed with err: %v\n", err)
+				}
+				/*
+				if common.Conf.Trace.Package {
+					log.Printf("Package '%s' has deps %v", pkg, p.meta.Deps)
+					log.Printf("Package '%s' has top-level modules %v", pkg, p.meta.TopLevel)
+				}
+				*/
+
+				log.Printf("[packagePuller.go InstallRecursive()] goroutine[%d] installed Pkg[%s] at %v with Deps: %v; TopLevel: %v\n", i, pkg, time.Now().UnixNano() / 1e6, p.meta.Deps, p.meta.TopLevel)
+
+				// push any previously unseen deps on the list of ones to install
+				insMutex.Lock()
+				for _, dep := range p.meta.Deps {
+					if !(*installSet)[dep] {
+						*installs = append(*installs, dep)
+						(*installSet)[dep] = true
+					}
+				}
+				insMutex.Unlock()
+			}(&wg, &insMutex, i, &installs, &installSet, pp)
+		}
+
+		wg.Wait()
 	}
 
 	return installs, nil
