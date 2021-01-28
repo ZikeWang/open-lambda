@@ -428,8 +428,10 @@ func (f *LambdaFunc) Invoke(w http.ResponseWriter, r *http.Request) {
 	// send invocation to lambda func task, if room in queue
 	select {
 	case f.funcChan <- req:
+		log.Printf("[lambda.go Invoke()] req sent to lfunc[%s].funcChan\n", f.name)
 		// block until it's done
 		<-done
+		log.Printf("[lambda.go Invoke()] req get response by lfunc[%s].doneChan\n", f.name)
 	default:
 		// queue cannot accept more, so reply with backoff
 		req.w.WriteHeader(http.StatusTooManyRequests)
@@ -464,6 +466,7 @@ func (f *LambdaFunc) printf(format string, args ...interface{}) {
 //
 // Lambdas should have /handler/packages in their path, but not
 // /packages.
+// 解析指定的文件：接收路径名和文件名
 func parseMeta(codeDir string, funcName string) (meta *sandbox.SandboxMeta, err error) {
 	installs := make([]string, 0)
 	imports := make([]string, 0)
@@ -689,12 +692,14 @@ func (f *LambdaFunc) Task() {
 			handlerPath := filepath.Join(f.lmgr.codeDir, f.name) + ".py" // 这里不能把 f.name 放在 filepath.Join 里，否则就成了 /f.name/.py
 			if _, err := os.Stat(handlerPath); os.IsNotExist(err) {
 				srcPath := filepath.Join(common.Conf.Registry, f.name) + ".py"
-				log.Printf("[lambda.go lfunc.Task()] pull '%s.py', src: %s, dest: %s\n", f.name, srcPath, f.lmgr.codeDir)
+				log.Printf("[lambda.go lfunc.Task()] pull %s.py from %s to %s\n", f.name, srcPath, f.lmgr.codeDir)
 				cmd := exec.Command("cp", srcPath, f.lmgr.codeDir)
 				if err = cmd.Run(); err != nil {
 					log.Printf("[lambda.go lfunc.Task()] failed to pull %s.py : %v\n", f.name, err)
 					return
 				}
+			} else {
+				log.Printf("[lambda.go lfunc.Task()] %s.py already existed\n", f.name)
 			}
 
 			// 1. 解析代码文件获取待下载的 pkg，这里修改了 parseMeta 的传参
@@ -928,7 +933,7 @@ func (linst *LambdaInstance) Task() {
 		var req *Invocation
 		select {
 		case req = <-f.instChan:
-			log.Printf("[lambda.go linst.Task()] outer f.instChan recv signal\n")
+			log.Printf("[lambda.go linst.Task()] f.instChan(outer) recv signal\n")
 		case killed := <-linst.killChan:
 			log.Printf("[lambda.go linst.Task()] linst.killChan recv signal\n")
 			if sb != nil {
@@ -1063,7 +1068,7 @@ func (linst *LambdaInstance) Task() {
 			// grab another request (non-blocking)
 			select {
 			case req = <-f.instChan:
-				log.Printf("[lambda.go linst.Task()] inner f.instChan recv signal\n")
+				log.Printf("[lambda.go linst.Task()] f.instChan(inner) recv signal\n")
 			default:
 				req = nil
 			}
