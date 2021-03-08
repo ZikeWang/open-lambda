@@ -93,7 +93,7 @@ def deps(dirname):
 def f(event):
     pkg = event["pkg"]
     alreadyInstalled = event["alreadyInstalled"]
-    path = "/packages/" + pkg + "/files"
+    path = "/packages/" + pkg
     if not alreadyInstalled:
         rc = os.system('pip3 install --no-deps %s -t %s' % (pkg, path))
         print('pip install returned code %d' % rc)

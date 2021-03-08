@@ -70,7 +70,7 @@ class SockFileHandler(tornado.web.RequestHandler):
             tm1 = time.time() # 返回浮点秒数，小数点前精确到秒，小数点后第三位精确到毫秒
             stm = str(exec_cnt) + ' : ' + modname + ' : call start : ' + str(tm1) + '\n'
 
-            self.write(json.dumps(ff.f(event)))
+            self.write(json.dumps(ff.f(event))) # json.dumps 字典->字符串，因此 ff.f(event) 应该返回字典类型
 
             # 函数调用计时终点
             tm2 = time.time()
